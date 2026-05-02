@@ -165,10 +165,6 @@ Report back to the user:
 2. Any fields that were left as `<fill-in>` placeholders that they must edit
    before first run (storage account, blob container, anything else they
    skipped).
-3. A reminder that the wrappers pass `-Config $config` to the core scripts and
-   that the core scripts must accept that parameter — currently
-   `core/scripts/Backup-GameServer.ps1` and `Check-ServerHealth.ps1` still
-   contain hardcoded values, so `-Config` won't have an effect there until
-   those scripts are refactored to read from the hashtable.
 
-Do **not** modify the core scripts as part of this task.
+Do **not** modify the core scripts as part of this task — they already accept
+`-Config` and read everything from the hashtable.

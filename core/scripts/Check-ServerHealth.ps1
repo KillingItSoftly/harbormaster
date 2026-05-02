@@ -1,27 +1,61 @@
 <#
 .SYNOPSIS
-    Periodic health check for the Windrose server. Sends Discord alerts
-    only when something is wrong or notable.
-#>
+    Periodic health check for a Harbormaster-managed game server. Sends
+    Discord alerts only when something is wrong or notable.
 
+.DESCRIPTION
+    Game-agnostic. All paths, names, log patterns and env-var prefixes come
+    from the -Config hashtable.
+
+.PARAMETER Config
+    Hashtable with at least:
+      GameName, EnvVarPrefix, ServiceName, LogPath,
+      CrashLogPattern, LogTimestampRegex
+#>
 [CmdletBinding()]
 param(
+    [Parameter(Mandatory)]
+    [hashtable]$Config,
+
     [int]$DiskWarnGB = 20,
     [int]$DiskCriticalGB = 5,
     [int]$BackupFailureWindowHours = 26,
     [int]$ServiceDownAlertMinutes = 10,
-    [string]$StateFile = 'C:\Logs\windrose-health-state.json'
+    [string]$StateFile
 )
 
 $ErrorActionPreference = 'Continue'
 
-Import-Module C:\Scripts\HarbormasterNotify.psm1 -Force
+$moduleRoot = Join-Path $PSScriptRoot '..\modules'
+Import-Module (Join-Path $moduleRoot 'HarbormasterNotify.psm1') -Force
+Import-Module (Join-Path $moduleRoot 'HarbormasterHealthchecks.psm1') -Force
 
-Import-Module C:\Scripts\HarbormasterHealthchecks.psm1 -Force
+$slug = $Config.GameName.ToLower()
+if (-not $StateFile) {
+    $StateFile = "C:\Logs\${slug}-health-state.json"
+}
 
-$hcVar = Get-DayBucketEnvVar -BaseName 'HARBORMASTER_HC_HEALTH'
-
+$hcVar = Get-DayBucketEnvVar -BaseName "$($Config.EnvVarPrefix)_HC_HEALTH"
 Send-Heartbeat -EnvVarName $hcVar -Status Start
+
+# Convenience wrapper that pre-fills the per-game args.
+function Notify {
+    param(
+        [Parameter(Mandatory)][string]$Title,
+        [Parameter(Mandatory)][string]$Message,
+        [string]$Severity = 'Info',
+        [string]$Channel = 'Status',
+        [hashtable]$Fields = @{}
+    )
+    Send-HarbormasterNotification `
+        -Title $Title `
+        -Message $Message `
+        -Severity $Severity `
+        -Channel $Channel `
+        -Fields $Fields `
+        -EnvVarPrefix $Config.EnvVarPrefix `
+        -GameName $Config.GameName
+}
 
 # Load previous state to avoid spamming on persistent issues
 $state = if (Test-Path $StateFile) {
@@ -41,12 +75,12 @@ function Mark-Alerted { param([string]$Key); $state[$Key] = $now.ToString('o') }
 function Clear-Alert { param([string]$Key); $state.Remove($Key) | Out-Null }
 
 # --- Check 1: Service running ---
-$svc = Get-Service WindroseServer -ErrorAction SilentlyContinue
+$svc = Get-Service $Config.ServiceName -ErrorAction SilentlyContinue
 if (-not $svc) {
     if (Should-Alert 'service-missing' 1440) {
-        Send-WindroseNotification `
+        Notify `
             -Title 'Service not installed' `
-            -Message 'WindroseServer service was not found. Has NSSM been removed?' `
+            -Message "$($Config.ServiceName) service was not found. Has NSSM been removed?" `
             -Severity Critical `
             -Channel Alerts
         Mark-Alerted 'service-missing'
@@ -55,7 +89,7 @@ if (-not $svc) {
 elseif ($svc.Status -ne 'Running') {
     # Check how long it's been down
     $stopTime = (Get-EventLog -LogName Application -Source nssm -Newest 50 -ErrorAction SilentlyContinue |
-        Where-Object { $_.Message -like "*WindroseServer*" -and $_.Message -like "*stop*" } |
+        Where-Object { $_.Message -like "*$($Config.ServiceName)*" -and $_.Message -like "*stop*" } |
         Select-Object -First 1).TimeGenerated
 
     $downMinutes = if ($stopTime) {
@@ -65,7 +99,7 @@ elseif ($svc.Status -ne 'Running') {
     }
 
     if ($downMinutes -ge $ServiceDownAlertMinutes -and (Should-Alert 'service-down' 30)) {
-        Send-WindroseNotification `
+        Notify `
             -Title 'Server is down' `
             -Message "Service has been in '$($svc.Status)' state for ~$downMinutes minutes." `
             -Severity Critical `
@@ -77,7 +111,7 @@ elseif ($svc.Status -ne 'Running') {
 else {
     # Service is running; clear any prior down alert
     if ($state.ContainsKey('service-down')) {
-        Send-WindroseNotification `
+        Notify `
             -Title 'Server recovered' `
             -Message 'Service is running again.' `
             -Severity Success `
@@ -87,19 +121,21 @@ else {
 }
 
 # --- Check 2: Recent crashes ---
-$logPath = 'C:\GameServers\Windrose\logs\server-stdout.log'
-if (Test-Path $logPath) {
-    $recentCrashes = Get-Content $logPath -Tail 5000 |
-        Select-String -Pattern 'Crash Stack Trace' |
+if (Test-Path $Config.LogPath) {
+    $crashPattern = $Config.CrashLogPattern
+    $tsRegex      = $Config.LogTimestampRegex
+
+    $recentCrashes = Get-Content $Config.LogPath -Tail 5000 |
+        Select-String -Pattern $crashPattern |
         Where-Object {
-            if ($_.Line -match '\[(\d{4})\.(\d{2})\.(\d{2})-(\d{2})\.(\d{2})\.(\d{2}):\d+\]') {
+            if ($_.Line -match $tsRegex) {
                 $crashTime = [datetime]"$($Matches[1])-$($Matches[2])-$($Matches[3]) $($Matches[4]):$($Matches[5]):$($Matches[6])"
                 ($now - $crashTime).TotalHours -lt 1
             } else { $false }
         }
 
     if ($recentCrashes.Count -ge 3 -and (Should-Alert 'crash-loop' 60)) {
-        Send-WindroseNotification `
+        Notify `
             -Title 'Multiple crashes detected' `
             -Message "$($recentCrashes.Count) crash trace(s) in the last hour. Check the logs." `
             -Severity Critical `
@@ -110,12 +146,13 @@ if (Test-Path $logPath) {
 }
 
 # --- Check 3: Backup ran successfully ---
-$backupTask = Get-ScheduledTaskInfo -TaskName 'WindroseBackup' -ErrorAction SilentlyContinue
+$backupTaskName = "$($Config.GameName)Backup"
+$backupTask = Get-ScheduledTaskInfo -TaskName $backupTaskName -ErrorAction SilentlyContinue
 if ($backupTask) {
     $hoursSinceLastRun = ($now - $backupTask.LastRunTime).TotalHours
     if ($hoursSinceLastRun -gt $BackupFailureWindowHours) {
         if (Should-Alert 'backup-stale' 720) {
-            Send-WindroseNotification `
+            Notify `
                 -Title 'Backup may be stale' `
                 -Message "Last backup ran $([math]::Round($hoursSinceLastRun, 1)) hours ago." `
                 -Severity Warning `
@@ -126,7 +163,7 @@ if ($backupTask) {
     }
     elseif ($backupTask.LastTaskResult -ne 0) {
         if (Should-Alert 'backup-failed' 360) {
-            Send-WindroseNotification `
+            Notify `
                 -Title 'Backup failed' `
                 -Message "Last backup completed with non-zero exit code." `
                 -Severity Critical `
@@ -146,7 +183,7 @@ $cDrive = Get-PSDrive C
 $freeGB = [math]::Round($cDrive.Free / 1GB, 1)
 
 if ($freeGB -lt $DiskCriticalGB -and (Should-Alert 'disk-critical' 360)) {
-    Send-WindroseNotification `
+    Notify `
         -Title 'Disk space critical' `
         -Message "Only $freeGB GB free on C:. Server may fail soon." `
         -Severity Critical `
@@ -155,7 +192,7 @@ if ($freeGB -lt $DiskCriticalGB -and (Should-Alert 'disk-critical' 360)) {
     Mark-Alerted 'disk-critical'
 }
 elseif ($freeGB -lt $DiskWarnGB -and (Should-Alert 'disk-warn' 1440)) {
-    Send-WindroseNotification `
+    Notify `
         -Title 'Disk space low' `
         -Message "$freeGB GB free on C:. Consider cleaning up old backups or logs." `
         -Severity Warning `
@@ -171,4 +208,8 @@ elseif ($freeGB -ge $DiskWarnGB) {
 Send-Heartbeat -EnvVarName $hcVar -Status Success
 
 # --- Save state ---
+$stateDir = Split-Path $StateFile -Parent
+if (-not (Test-Path $stateDir)) {
+    New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
+}
 $state | ConvertTo-Json | Set-Content $StateFile -Encoding UTF8

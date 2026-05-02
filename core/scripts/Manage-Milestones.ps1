@@ -1,22 +1,35 @@
 <#
 .SYNOPSIS
-    Manage Windrose milestone snapshots and pruning.
+    Manage milestone snapshots and pruning for a Harbormaster-managed game
+    server.
 
 .DESCRIPTION
-    Two modes:
+    Three modes:
       Snapshot - creates a labeled milestone backup (local + blob).
       Prune    - removes old milestones based on category retention rules.
       List     - shows current milestones in blob storage.
 
-.EXAMPLE
-    .\Manage-WindroseMilestones.ps1 -Action Snapshot -Label "before-windroseplus-reinstall" -Category pre-change
+    Game-agnostic. All paths, names and storage targets come from the
+    -Config hashtable.
+
+.PARAMETER Config
+    Hashtable with at least:
+      GameName, ServiceName, SavedDataPath,
+      LocalBackupRoot, StorageAccount, BlobContainer
 
 .EXAMPLE
-    .\Manage-WindroseMilestones.ps1 -Action Prune -DryRun
+    .\Manage-Milestones.ps1 -Config $cfg -Action Snapshot `
+        -Label 'before-mod-reinstall' -Category pre-change
+
+.EXAMPLE
+    .\Manage-Milestones.ps1 -Config $cfg -Action Prune -DryRun
 #>
 
 [CmdletBinding()]
 param(
+    [Parameter(Mandatory)]
+    [hashtable]$Config,
+
     [ValidateSet('Snapshot', 'Prune', 'List')]
     [string]$Action = 'Snapshot',
 
@@ -26,8 +39,6 @@ param(
     [string]$Category = 'general',
 
     [switch]$DryRun
-
-    [hashtable]$Config
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,7 +54,7 @@ $retention = @{
 function Connect-Storage {
     Write-Host "Authenticating to Azure with managed identity..." -ForegroundColor Cyan
     Connect-AzAccount -Identity | Out-Null
-    return New-AzStorageContext -StorageAccountName $config.StorageAccount -UseConnectedAccount
+    return New-AzStorageContext -StorageAccountName $Config.StorageAccount -UseConnectedAccount
 }
 
 function Get-MilestoneCategory {
@@ -55,10 +66,10 @@ function Get-MilestoneCategory {
 }
 
 function Stop-ServiceIfRunning {
-    $svc = Get-Service $config.ServiceName -ErrorAction SilentlyContinue
+    $svc = Get-Service $Config.ServiceName -ErrorAction SilentlyContinue
     if ($svc -and $svc.Status -eq 'Running') {
-        Write-Host "Stopping $($config.ServiceName) for clean snapshot..." -ForegroundColor Yellow
-        Stop-Service $config.ServiceName -Force
+        Write-Host "Stopping $($Config.ServiceName) for clean snapshot..." -ForegroundColor Yellow
+        Stop-Service $Config.ServiceName -Force
         Start-Sleep -Seconds 5
         return $true
     }
@@ -68,11 +79,11 @@ function Stop-ServiceIfRunning {
 function Start-ServiceIfWasRunning {
     param([bool]$WasRunning)
     if ($WasRunning) {
-        Write-Host "Restarting $($config.ServiceName)..." -ForegroundColor Yellow
+        Write-Host "Restarting $($Config.ServiceName)..." -ForegroundColor Yellow
         try {
-            Start-Service $config.ServiceName -ErrorAction Stop
+            Start-Service $Config.ServiceName -ErrorAction Stop
             Start-Sleep -Seconds 10
-            $svc = Get-Service $config.ServiceName
+            $svc = Get-Service $Config.ServiceName
             if ($svc.Status -ne 'Running') {
                 Write-Warning "Service status is $($svc.Status) after start attempt"
             } else {
@@ -80,7 +91,7 @@ function Start-ServiceIfWasRunning {
             }
         }
         catch {
-            Write-Error "CRITICAL: Failed to restart $($config.ServiceName): $_"
+            Write-Error "CRITICAL: Failed to restart $($Config.ServiceName): $_"
         }
     }
 }
@@ -90,17 +101,17 @@ function Invoke-Snapshot {
         throw "The -Label parameter is required for Snapshot action."
     }
 
-    $sourcePath = Join-Path $config.ServerDir $config.SavedSubPath
+    $sourcePath = $Config.SavedDataPath
     if (-not (Test-Path $sourcePath)) {
-        throw "Source path not found: $sourcePath. Check the ServerDir config."
+        throw "Source path not found: $sourcePath. Check SavedDataPath in config."
     }
 
-    $safeLabel = $Label -replace '[^a-zA-Z0-9_-]', '_'
-    $timestamp = Get-Date -Format 'yyyy-MM-dd_HHmm'
+    $safeLabel   = $Label -replace '[^a-zA-Z0-9_-]', '_'
+    $timestamp   = Get-Date -Format 'yyyy-MM-dd_HHmm'
     $archiveName = "milestone_${Category}_${safeLabel}_${timestamp}.zip"
 
-    New-Item -ItemType Directory -Path $config.LocalBackupRoot -Force | Out-Null
-    $localArchive = Join-Path $config.LocalBackupRoot $archiveName
+    New-Item -ItemType Directory -Path $Config.LocalBackupRoot -Force | Out-Null
+    $localArchive = Join-Path $Config.LocalBackupRoot $archiveName
 
     Write-Host ""
     Write-Host "=== Creating Milestone ===" -ForegroundColor Cyan
@@ -127,13 +138,13 @@ function Invoke-Snapshot {
 
     Set-AzStorageBlobContent `
         -File $localArchive `
-        -Container $config.Container `
-        -Blob "$($config.BlobPrefix)$archiveName" `
+        -Container $Config.BlobContainer `
+        -Blob $archiveName `
         -Context $ctx `
         -StandardBlobTier Cool `
         -Force | Out-Null
 
-    Write-Host "Milestone uploaded: $($config.BlobPrefix)$archiveName" -ForegroundColor Green
+    Write-Host "Milestone uploaded: $archiveName" -ForegroundColor Green
     Write-Host ""
 }
 
@@ -155,44 +166,38 @@ function Invoke-Prune {
     }
     Write-Host ""
 
-    $ctx = Connect-Storage
-    $blobs = Get-AzStorageBlob -Container $config.Container -Context $ctx -Prefix $config.BlobPrefix
-    $now = Get-Date
+    $ctx   = Connect-Storage
+    $blobs = Get-AzStorageBlob -Container $Config.BlobContainer -Context $ctx
+    $now   = Get-Date
 
     $toDelete = @()
     $toKeep   = @()
 
     foreach ($blob in $blobs) {
-        if ($blob.Name -notlike "$($config.BlobPrefix)milestone_*.zip") {
+        if ($blob.Name -notlike "milestone_*.zip") {
             continue
         }
 
-        $category = Get-MilestoneCategory -BlobName $blob.Name
+        $category      = Get-MilestoneCategory -BlobName $blob.Name
         $retentionDays = $retention[$category]
-        $age = ($now - $blob.LastModified.LocalDateTime).TotalDays
+        $age           = ($now - $blob.LastModified.LocalDateTime).TotalDays
 
         if ($null -eq $retentionDays) {
             $toKeep += [PSCustomObject]@{
-                Name     = $blob.Name
-                Category = $category
-                AgeDays  = [math]::Round($age, 1)
-                Reason   = 'kept forever'
+                Name = $blob.Name; Category = $category
+                AgeDays = [math]::Round($age, 1); Reason = 'kept forever'
             }
         }
         elseif ($age -gt $retentionDays) {
             $toDelete += [PSCustomObject]@{
-                Name     = $blob.Name
-                Category = $category
-                AgeDays  = [math]::Round($age, 1)
-                Reason   = "older than $retentionDays days"
+                Name = $blob.Name; Category = $category
+                AgeDays = [math]::Round($age, 1); Reason = "older than $retentionDays days"
             }
         }
         else {
             $toKeep += [PSCustomObject]@{
-                Name     = $blob.Name
-                Category = $category
-                AgeDays  = [math]::Round($age, 1)
-                Reason   = "within $retentionDays-day window"
+                Name = $blob.Name; Category = $category
+                AgeDays = [math]::Round($age, 1); Reason = "within $retentionDays-day window"
             }
         }
     }
@@ -216,7 +221,7 @@ function Invoke-Prune {
     }
 
     foreach ($item in $toDelete) {
-        Remove-AzStorageBlob -Container $config.Container -Blob $item.Name -Context $ctx -Force
+        Remove-AzStorageBlob -Container $Config.BlobContainer -Blob $item.Name -Context $ctx -Force
         Write-Host "  Deleted: $($item.Name)" -ForegroundColor DarkGray
     }
 
@@ -228,15 +233,15 @@ function Invoke-List {
     Write-Host "=== Current Milestones in Blob Storage ===" -ForegroundColor Cyan
     Write-Host ""
 
-    $ctx = Connect-Storage
-    $blobs = Get-AzStorageBlob -Container $config.Container -Context $ctx -Prefix $config.BlobPrefix
-    $now = Get-Date
+    $ctx   = Connect-Storage
+    $blobs = Get-AzStorageBlob -Container $Config.BlobContainer -Context $ctx
+    $now   = Get-Date
 
     $milestones = $blobs |
-        Where-Object { $_.Name -like "$($config.BlobPrefix)milestone_*.zip" } |
+        Where-Object { $_.Name -like "milestone_*.zip" } |
         ForEach-Object {
             [PSCustomObject]@{
-                Name      = ($_.Name -replace [regex]::Escape($config.BlobPrefix), '')
+                Name      = $_.Name
                 Category  = Get-MilestoneCategory -BlobName $_.Name
                 SizeMB    = [math]::Round($_.Length / 1MB, 2)
                 AgeDays   = [math]::Round(($now - $_.LastModified.LocalDateTime).TotalDays, 1)

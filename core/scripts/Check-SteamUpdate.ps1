@@ -1,73 +1,89 @@
 <#
 .SYNOPSIS
-    Check for and optionally apply Windrose dedicated server updates.
+    Check for and optionally apply dedicated server updates from Steam.
 
 .DESCRIPTION
-    Compares the installed Windrose dedicated server build against the current
-    public build on Steam. Can run in check-only mode (default) or apply mode.
+    Compares the installed dedicated server build against the current public
+    build on Steam. Can run in check-only mode (default) or apply mode.
 
-    When -ApplyUpdate is set, takes a milestone snapshot via
-    Manage-WindroseMilestones.ps1 before applying the update. If the snapshot
-    fails, the update is aborted to preserve a rollback point.
-
-    Notifications are sent via the WindroseNotify module (env vars
-    WINDROSE_WEBHOOK_ALERTS and WINDROSE_WEBHOOK_STATUS).
+    When -ApplyUpdate is set, takes a milestone snapshot via the sibling
+    Manage-Milestones.ps1 (using the same -Config) before applying the
+    update. If the snapshot fails, the update is aborted to preserve a
+    rollback point.
 
     Designed to be run from Task Scheduler. Returns:
       Exit 0 - no update available, or update applied successfully
       Exit 1 - update is available (when -ApplyUpdate is not set)
       Exit 2 - error checking, snapshotting, or applying update
 
+.PARAMETER Config
+    Hashtable with at least:
+      GameName, EnvVarPrefix
+      SteamAppId, InstallDir, SteamCmdPath
+      ServiceName
+
 .PARAMETER ApplyUpdate
-    If set, takes a snapshot then downloads and installs the update via SteamCMD.
-    The Windrose service will be stopped before the update and restarted after.
+    If set, takes a snapshot then downloads and installs the update via
+    SteamCMD. The service will be stopped before the update and restarted
+    after.
 
 .PARAMETER NotifyOnly
     If set, only checks and reports. Does not apply updates even if available.
 
 .PARAMETER LogPath
-    Where to write the log file. Defaults to C:\Logs\Windrose-UpdateCheck.log.
+    Where to write the log file. Defaults to
+    C:\Logs\<GameName>-UpdateCheck.log.
 
 .PARAMETER SkipSnapshot
     If set with -ApplyUpdate, skips the pre-update snapshot. Use with caution.
-
-.EXAMPLE
-    # Check only, no update applied
-    .\Check-WindroseUpdate.ps1
-
-.EXAMPLE
-    # Check and apply update if available, with snapshot first
-    .\Check-WindroseUpdate.ps1 -ApplyUpdate
 #>
 
 [CmdletBinding()]
 param(
+    [Parameter(Mandatory)]
+    [hashtable]$Config,
+
     [switch]$ApplyUpdate,
     [switch]$NotifyOnly,
-    [string]$LogPath = 'C:\Logs\<your_game>-UpdateCheck.log',
+    [string]$LogPath,
     [switch]$SkipSnapshot
 )
 
 $ErrorActionPreference = 'Stop'
 
-Import-Module C:\Scripts\HarbormasterNotify.psm1 -Force
+$moduleRoot = Join-Path $PSScriptRoot '..\modules'
+Import-Module (Join-Path $moduleRoot 'HarbormasterNotify.psm1') -Force
+Import-Module (Join-Path $moduleRoot 'HarbormasterHealthchecks.psm1') -Force
 
-Import-Module C:\Scripts\HarbormasterHealthchecks.psm1 -Force
+if (-not $LogPath) {
+    $LogPath = "C:\Logs\$($Config.GameName)-UpdateCheck.log"
+}
 
-$hcVar = Get-DayBucketEnvVar -BaseName 'HARBORMASTER_HC_UPDATE_CHECK'
+# Sibling milestone script — used for the pre-update snapshot.
+$snapshotScriptPath = Join-Path $PSScriptRoot 'Manage-Milestones.ps1'
 
+$hcVar = Get-DayBucketEnvVar -BaseName "$($Config.EnvVarPrefix)_HC_UPDATE_CHECK"
 Send-Heartbeat -EnvVarName $hcVar -Status Start
 
 # ============================================================================
-# Configuration
+# Notification helper
 # ============================================================================
-$config = @{
-    GameName           = '<your_game>'
-    SteamAppId         = ''
-    InstallDir         = ''
-    SteamCmdPath       = ''
-    ServiceName        = ''
-    SnapshotScriptPath = 'C:\Scripts\Manage-Milestones.ps1'
+function Notify {
+    param(
+        [Parameter(Mandatory)][string]$Title,
+        [Parameter(Mandatory)][string]$Message,
+        [string]$Severity = 'Info',
+        [string]$Channel = 'Status',
+        [hashtable]$Fields = @{}
+    )
+    Send-HarbormasterNotification `
+        -Title $Title `
+        -Message $Message `
+        -Severity $Severity `
+        -Channel $Channel `
+        -Fields $Fields `
+        -EnvVarPrefix $Config.EnvVarPrefix `
+        -GameName $Config.GameName
 }
 
 # ============================================================================
@@ -102,7 +118,7 @@ function Write-Log {
 # Get installed build ID
 # ============================================================================
 function Get-InstalledBuildId {
-    $manifestPath = Join-Path $config.InstallDir "steamapps\appmanifest_$($config.SteamAppId).acf"
+    $manifestPath = Join-Path $Config.InstallDir "steamapps\appmanifest_$($Config.SteamAppId).acf"
 
     if (-not (Test-Path $manifestPath)) {
         Write-Log "Manifest file not found at $manifestPath" -Level WARN
@@ -123,7 +139,7 @@ function Get-InstalledBuildId {
 # Get current public build ID from Steam
 # ============================================================================
 function Get-PublicBuildId {
-    $url = "https://api.steamcmd.net/v1/info/$($config.SteamAppId)"
+    $url = "https://api.steamcmd.net/v1/info/$($Config.SteamAppId)"
 
     try {
         Write-Log "Querying Steam API at $url"
@@ -134,7 +150,7 @@ function Get-PublicBuildId {
             return $null
         }
 
-        $publicBranch = $response.data.($config.SteamAppId).depots.branches.public
+        $publicBranch = $response.data.($Config.SteamAppId).depots.branches.public
 
         if (-not $publicBranch) {
             Write-Log "No 'public' branch found in API response." -Level WARN
@@ -163,8 +179,8 @@ function Invoke-PreUpdateSnapshot {
         [string]$PublicBuild
     )
 
-    if (-not (Test-Path $config.SnapshotScriptPath)) {
-        Write-Log "Snapshot script not found at $($config.SnapshotScriptPath)" -Level ERROR
+    if (-not (Test-Path $snapshotScriptPath)) {
+        Write-Log "Snapshot script not found at $snapshotScriptPath" -Level ERROR
         return $false
     }
 
@@ -172,7 +188,8 @@ function Invoke-PreUpdateSnapshot {
     Write-Log "Taking pre-update snapshot with label: $label" -Level INFO
 
     try {
-        & $config.SnapshotScriptPath `
+        & $snapshotScriptPath `
+            -Config $Config `
             -Action Snapshot `
             -Label $label `
             -Category 'pre-change'
@@ -194,33 +211,33 @@ function Invoke-PreUpdateSnapshot {
 # ============================================================================
 # Apply the update
 # ============================================================================
-function Invoke-WindroseUpdate {
+function Invoke-Update {
     Write-Log "Starting update process..." -Level INFO
 
-    $svc = Get-Service $config.ServiceName -ErrorAction SilentlyContinue
+    $svc = Get-Service $Config.ServiceName -ErrorAction SilentlyContinue
     $wasRunning = $false
     if ($svc -and $svc.Status -eq 'Running') {
-        Write-Log "Stopping $($config.ServiceName)..." -Level INFO
-        Stop-Service $config.ServiceName -Force
+        Write-Log "Stopping $($Config.ServiceName)..." -Level INFO
+        Stop-Service $Config.ServiceName -Force
         Start-Sleep -Seconds 10
         $wasRunning = $true
     }
 
     try {
-        if (-not (Test-Path $config.SteamCmdPath)) {
-            throw "SteamCMD not found at $($config.SteamCmdPath)"
+        if (-not (Test-Path $Config.SteamCmdPath)) {
+            throw "SteamCMD not found at $($Config.SteamCmdPath)"
         }
 
         Write-Log "Running SteamCMD update..." -Level INFO
         $steamCmdArgs = @(
-            '+force_install_dir', "`"$($config.InstallDir)`"",
+            '+force_install_dir', "`"$($Config.InstallDir)`"",
             '+login', 'anonymous',
-            '+app_update', $config.SteamAppId, 'validate',
+            '+app_update', $Config.SteamAppId, 'validate',
             '+quit'
         )
 
         $process = Start-Process `
-            -FilePath $config.SteamCmdPath `
+            -FilePath $Config.SteamCmdPath `
             -ArgumentList $steamCmdArgs `
             -NoNewWindow `
             -Wait `
@@ -234,14 +251,14 @@ function Invoke-WindroseUpdate {
     }
     finally {
         if ($wasRunning) {
-            Write-Log "Restarting $($config.ServiceName)..." -Level INFO
+            Write-Log "Restarting $($Config.ServiceName)..." -Level INFO
             try {
-                Start-Service $config.ServiceName
+                Start-Service $Config.ServiceName
                 Start-Sleep -Seconds 15
-                $svc = Get-Service $config.ServiceName
+                $svc = Get-Service $Config.ServiceName
                 if ($svc.Status -ne 'Running') {
                     Write-Log "Service did not start cleanly. Status: $($svc.Status)" -Level ERROR
-                    Send-WindroseNotification `
+                    Notify `
                         -Title 'Server failed to start' `
                         -Message "Update completed but service status is '$($svc.Status)'. Manual intervention needed." `
                         -Severity Critical `
@@ -252,7 +269,7 @@ function Invoke-WindroseUpdate {
             }
             catch {
                 Write-Log "Failed to restart service: $_" -Level ERROR
-                Send-WindroseNotification `
+                Notify `
                     -Title 'Server failed to start' `
                     -Message "Update completed but service start threw an error: $_" `
                     -Severity Critical `
@@ -265,7 +282,7 @@ function Invoke-WindroseUpdate {
 # ============================================================================
 # Main
 # ============================================================================
-Write-Log "=== Windrose Update Check ==="
+Write-Log "=== $($Config.GameName) Update Check ==="
 
 $installed = Get-InstalledBuildId
 if (-not $installed) {
@@ -296,14 +313,13 @@ if ($installed -eq $publicInfo.BuildId) {
 Write-Log "UPDATE AVAILABLE: installed=$installed, public=$($publicInfo.BuildId)" -Level WARN
 
 if ($ApplyUpdate -and -not $NotifyOnly) {
-    Send-WindroseNotification `
+    Notify `
         -Title 'Update available - applying' `
-        -Message 'Windrose update detected. Will snapshot then apply.' `
+        -Message "$($Config.GameName) update detected. Will snapshot then apply." `
         -Severity Warning `
         -Channel Alerts `
         -Fields @{ Installed = $installed; Public = $publicInfo.BuildId }
 
-    # Take pre-update snapshot unless explicitly skipped
     if (-not $SkipSnapshot) {
         Write-Log "Taking pre-update snapshot..." -Level INFO
         $snapshotOk = Invoke-PreUpdateSnapshot `
@@ -311,9 +327,8 @@ if ($ApplyUpdate -and -not $NotifyOnly) {
             -PublicBuild $publicInfo.BuildId
 
         if (-not $snapshotOk) {
-            $errMsg = "Pre-update snapshot FAILED. Aborting update to preserve rollback point. Run manually after investigating."
-            Write-Log $errMsg -Level ERROR
-            Send-WindroseNotification `
+            Write-Log "Pre-update snapshot FAILED. Aborting update." -Level ERROR
+            Notify `
                 -Title 'Update aborted - snapshot failed' `
                 -Message 'Pre-update snapshot failed. Update was not applied to preserve a rollback point. Investigate manually.' `
                 -Severity Critical `
@@ -324,29 +339,28 @@ if ($ApplyUpdate -and -not $NotifyOnly) {
     }
     else {
         Write-Log "SkipSnapshot flag set; bypassing snapshot. No rollback point." -Level WARN
-        Send-WindroseNotification `
+        Notify `
             -Title 'Update without snapshot' `
             -Message 'SkipSnapshot flag was set. Update is being applied without a rollback point.' `
             -Severity Warning `
             -Channel Alerts
     }
 
-    # Apply the update
     try {
-        Invoke-WindroseUpdate
-        Send-WindroseNotification `
+        Invoke-Update
+        Notify `
             -Title 'Update applied' `
-            -Message "$($config.GameName) updated successfully and service is running." `
+            -Message "$($Config.GameName) updated successfully and service is running." `
             -Severity Success `
             -Channel Status `
             -Fields @{ From = $installed; To = $publicInfo.BuildId }
         Write-Log "Update applied successfully." -Level OK
         Send-Heartbeat -EnvVarName $hcVar -Status Success
-	exit 0
+        exit 0
     }
     catch {
         Write-Log "Update failed: $_" -Level ERROR
-        Send-WindroseNotification `
+        Notify `
             -Title 'Update FAILED' `
             -Message "SteamCMD update failed: $_`n`nA pre-update snapshot was taken; you can roll back if needed." `
             -Severity Critical `
@@ -358,9 +372,9 @@ if ($ApplyUpdate -and -not $NotifyOnly) {
 }
 else {
     # Check-only mode: notify that an update is available but don't apply it
-    Send-WindroseNotification `
+    Notify `
         -Title 'Update available' `
-        -Message 'A Windrose update is available. Run with -ApplyUpdate to install.' `
+        -Message "A $($Config.GameName) update is available. Run with -ApplyUpdate to install." `
         -Severity Warning `
         -Channel Alerts `
         -Fields @{ Installed = $installed; Public = $publicInfo.BuildId }

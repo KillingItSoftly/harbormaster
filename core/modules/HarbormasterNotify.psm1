@@ -1,9 +1,14 @@
 
-function Send-WindroseNotification {
+function Send-HarbormasterNotification {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Title,
         [Parameter(Mandatory)][string]$Message,
+
+        # Game-scoped values, normally pulled from the per-game config hashtable.
+        [Parameter(Mandatory)][string]$EnvVarPrefix,
+        [Parameter(Mandatory)][string]$GameName,
+
         [ValidateSet("Critical", "Warning", "Info", "Success")]
         [string]$Severity = "Info",
         [ValidateSet("Alerts", "Status")]
@@ -11,13 +16,11 @@ function Send-WindroseNotification {
         [hashtable]$Fields = @{}
     )
 
-    $envVarName = "WINDROSE_WEBHOOK_$($Channel.ToUpper())"
+    $envVarName = "${EnvVarPrefix}_WEBHOOK_$($Channel.ToUpper())"
     $url = [Environment]::GetEnvironmentVariable($envVarName, 'Process')
     if ([string]::IsNullOrWhiteSpace($url)) {
-        Write-Warning "No webhook URL configured for channel '$Channel'. Set the WINDROSE_WEBHOOK_$($Channel.ToUpper()) env var."
-        return
+        $url = [Environment]::GetEnvironmentVariable($envVarName, 'Machine')
     }
-
     if ([string]::IsNullOrWhiteSpace($url)) {
         Write-Warning "No webhook URL configured for channel '$Channel'. Set the $envVarName env var."
         return
@@ -50,7 +53,7 @@ function Send-WindroseNotification {
         description = $Message
         color       = $color
         timestamp   = (Get-Date).ToUniversalTime().ToString("o")
-        footer      = @{ text = "Windrose Server" }
+        footer      = @{ text = "$GameName Server" }
     }
 
     if ($Fields.Count -gt 0) {
@@ -80,4 +83,4 @@ function Send-WindroseNotification {
     }
 }
 
-Export-ModuleMember -Function Send-WindroseNotification
+Export-ModuleMember -Function Send-HarbormasterNotification
