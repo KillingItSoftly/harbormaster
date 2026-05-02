@@ -1,0 +1,83 @@
+
+function Send-WindroseNotification {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Title,
+        [Parameter(Mandatory)][string]$Message,
+        [ValidateSet("Critical", "Warning", "Info", "Success")]
+        [string]$Severity = "Info",
+        [ValidateSet("Alerts", "Status")]
+        [string]$Channel = "Status",
+        [hashtable]$Fields = @{}
+    )
+
+    $envVarName = "WINDROSE_WEBHOOK_$($Channel.ToUpper())"
+    $url = [Environment]::GetEnvironmentVariable($envVarName, 'Process')
+    if ([string]::IsNullOrWhiteSpace($url)) {
+        Write-Warning "No webhook URL configured for channel '$Channel'. Set the WINDROSE_WEBHOOK_$($Channel.ToUpper()) env var."
+        return
+    }
+
+    if ([string]::IsNullOrWhiteSpace($url)) {
+        Write-Warning "No webhook URL configured for channel '$Channel'. Set the $envVarName env var."
+        return
+    }
+
+    # Strip any non-printable or non-ASCII characters
+    $url = ($url -replace '[^\x21-\x7E]', '').Trim()
+
+    if (-not ($url -match '^https://discord\.com/api/webhooks/\d+/[\w-]+$')) {
+        Write-Warning "Webhook URL for '$Channel' is malformed (length $($url.Length))."
+        return
+    }
+
+    $color = switch ($Severity) {
+        "Critical" { 16711680 }
+        "Warning"  { 16776960 }
+        "Success"  { 65280 }
+        "Info"     { 5814783 }
+    }
+
+    $prefix = switch ($Severity) {
+        "Critical" { "[CRITICAL]" }
+        "Warning"  { "[WARN]" }
+        "Success"  { "[OK]" }
+        "Info"     { "[INFO]" }
+    }
+
+    $embed = [ordered]@{
+        title       = "$prefix $Title"
+        description = $Message
+        color       = $color
+        timestamp   = (Get-Date).ToUniversalTime().ToString("o")
+        footer      = @{ text = "Windrose Server" }
+    }
+
+    if ($Fields.Count -gt 0) {
+        $embedFields = @()
+        foreach ($key in $Fields.Keys) {
+            $embedFields += [ordered]@{
+                name   = "$key"
+                value  = "$($Fields[$key])"
+                inline = $true
+            }
+        }
+        $embed.fields = $embedFields
+    }
+
+    $payload = @{ embeds = @($embed) } | ConvertTo-Json -Depth 10 -Compress
+
+    try {
+        Invoke-RestMethod `
+            -Uri $url `
+            -Method Post `
+            -Body $payload `
+            -ContentType "application/json; charset=utf-8" | Out-Null
+    }
+    catch {
+        Write-Warning "Discord notification failed: $_"
+        Write-Warning "Payload was: $payload"
+    }
+}
+
+Export-ModuleMember -Function Send-WindroseNotification
