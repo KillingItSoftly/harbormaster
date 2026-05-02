@@ -1,0 +1,117 @@
+# ==============================================================================
+# Harbormaster .gitignore
+# ==============================================================================
+
+# ----- Local configuration & secrets ------------------------------------------
+# Anything ending in .local.* is treated as machine-specific config that should
+# never be committed. Use this for files containing webhook URLs, storage
+# account names, paths specific to a particular VM, etc.
+*.local.*
+*.local
+
+# Environment variable dumps, .env files
+.env
+.env.*
+!.env.example
+
+# Per-machine config overrides
+config.local.ps1
+config.private.ps1
+secrets.ps1
+
+# ----- Logs & runtime state ---------------------------------------------------
+logs/
+*.log
+*.log.*
+
+# Health check state files (these track alert cooldowns, machine-specific)
+*-state.json
+windrose-health-state.json
+
+# ----- Backups (should NEVER be in the repo) ---------------------------------
+backups/
+*.zip
+*.7z
+*.tar
+*.tar.gz
+
+# Save data and game state
+saves/
+worlds/
+RocksDB/
+SaveProfiles/
+
+# ----- Game server installs (binaries, never source) -------------------------
+GameServers/
+SteamCMD/
+steamapps/
+steamcmd_appcache/
+appmanifest_*.acf
+
+# Mod frameworks & their pak builds
+windrose_plus/
+ue4ss/
+UE4SS*.dll
+UE4SS*.ini
+UE4SS*.log
+*.pak
+
+# ----- PowerShell-specific ----------------------------------------------------
+# Compiled module output
+*.cdxml.bak
+
+# Module cache
+PSScriptAnalyzerCache/
+
+# Pester test artifacts
+TestResults*.xml
+coverage.xml
+
+# ----- Azure / cloud artifacts -----------------------------------------------
+# Azure CLI cached credentials
+.azure/
+azureauth.json
+
+# Service principal credentials
+*-credentials.json
+
+# ----- Editor & OS ------------------------------------------------------------
+# VS Code workspace files (keep settings, ignore per-user state)
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# JetBrains
+.idea/
+
+# Vim
+*.swp
+*.swo
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS (in case you ever clone to a Mac)
+.DS_Store
+._*
+
+# Linux
+*~
+.directory
+
+# ----- Temp & junk ------------------------------------------------------------
+*.tmp
+*.bak
+*.old
+~$*
+*.swp
+
+# Notes that aren't ready to be committed
+NOTES.md
+TODO.local.md
+scratch/
