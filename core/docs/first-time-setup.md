@@ -367,7 +367,7 @@ Test-Path 'C:\Scripts\harbormaster\games\windrose\config.ps1'
 # Modules load without error
 Import-Module 'C:\Scripts\harbormaster\core\modules\HarbormasterNotify.psm1' -Force
 Import-Module 'C:\Scripts\harbormaster\core\modules\HarbormasterHealthchecks.psm1' -Force
-Get-Command Send-WindroseNotification, Send-Heartbeat
+Get-Command Send-HarbormasterNotification, Send-Heartbeat
 ```
 
 ---
@@ -396,7 +396,11 @@ $env:WINDROSE_WEBHOOK_STATUS = [Environment]::GetEnvironmentVariable('WINDROSE_W
 Test:
 
 ```powershell
-Send-WindroseNotification `
+Import-Module 'C:\Scripts\harbormaster\core\modules\HarbormasterNotify.psm1' -Force
+$Config = & 'C:\Scripts\harbormaster\games\windrose\config.ps1'
+
+Send-HarbormasterNotification `
+    -Config $Config `
     -Title 'Setup test' `
     -Message 'If you see this, Discord webhooks are working.' `
     -Severity Info `
