@@ -1,1 +1,24 @@
-{}
+{
+    "_comment": "Example WorldDescription.json fragment for an easier Windrose game. Copy the WorldSettings block into your actual WorldDescription.json (do not replace the entire file). Stop the service before editing. Set WorldPresetType to Custom elsewhere in the file so the server doesn't reconcile against a preset.",
+
+    "WorldSettings": {
+        "BoolParameters": {
+            "{\"TagName\": \"WDS.Parameter.Coop.SharedQuests\"}": true,
+            "{\"TagName\": \"WDS.Parameter.EasyExplore\"}": true
+        },
+        "FloatParameters": {
+            "{\"TagName\": \"WDS.Parameter.MobHealthMultiplier\"}": 0.75,
+            "{\"TagName\": \"WDS.Parameter.MobDamageMultiplier\"}": 0.75,
+            "{\"TagName\": \"WDS.Parameter.ShipsHealthMultiplier\"}": 0.75,
+            "{\"TagName\": \"WDS.Parameter.ShipsDamageMultiplier\"}": 0.75,
+            "{\"TagName\": \"WDS.Parameter.BoardingDifficultyMultiplier\"}": 0.75,
+            "{\"TagName\": \"WDS.Parameter.Coop.StatsCorrectionModifier\"}": 1,
+            "{\"TagName\": \"WDS.Parameter.Coop.ShipStatsCorrectionModifier\"}": 0
+        },
+        "TagParameters": {
+            "{\"TagName\": \"WDS.Parameter.CombatDifficulty\"}": {
+                "TagName": "WDS.Parameter.CombatDifficulty.Easy"
+            }
+        }
+    }
+}

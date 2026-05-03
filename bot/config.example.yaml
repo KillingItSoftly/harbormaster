@@ -1,0 +1,27 @@
+discord:
+  # Right-click your guild > Copy ID (Developer Mode required)
+  guild_id: "0000000000000000000"
+
+  # Discord roles. Player can do read-only + start; Admin can do destructive ops.
+  player_role_id: "0000000000000000000"
+  admin_role_id: "0000000000000000000"
+
+  # Optional channel ID for posting action confirmations. Omit to disable.
+  status_channel_id: null
+
+azure:
+  subscription_id: "00000000-0000-0000-0000-000000000000"
+  resource_group: "rg-harbormaster"
+  vm_name: "windrose-vm"
+
+game:
+  # PascalCase, must match the GameName field in games/<slug>/config.ps1
+  name: "Windrose"
+  service_name: "WindroseServer"
+  # Path on the VM to the cloned harbormaster repo's per-game folder.
+  # The bot calls the wrapper scripts in this directory directly.
+  script_dir: 'C:\Scripts\harbormaster\games\windrose'
+  log_path: 'C:\GameServers\Windrose\logs\server-stdout.log'
+
+# Per-user, per-command rate limit in seconds.
+rate_limit_seconds: 30
