@@ -8,7 +8,7 @@ RDP into the VM, open an **elevated** PowerShell window, and run:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-$url = 'https://raw.githubusercontent.com/twlorenz/harbormaster/main/install/Install-Harbormaster.ps1'
+$url = 'https://raw.githubusercontent.com/KillingItSoftly/harbormaster/main/install/Install-Harbormaster.ps1'
 Invoke-WebRequest $url -OutFile "$env:TEMP\Install-Harbormaster.ps1" -UseBasicParsing
 & "$env:TEMP\Install-Harbormaster.ps1"
 ```
