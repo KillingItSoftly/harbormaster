@@ -441,7 +441,8 @@ See [healthchecks-cron.md](healthchecks-cron.md) for the full setup. Quick versi
 5. Test heartbeats:
 ```powershell
    Import-Module 'C:\Scripts\harbormaster\core\modules\HarbormasterHealthchecks.psm1' -Force
-   Send-Heartbeat -EnvVarName 'WINDROSE_HC_BACKUP' -Status Success
+   $Config = & 'C:\Scripts\harbormaster\games\windrose\config.ps1'
+   Send-Heartbeat -Config $Config -Key BACKUP -Status Success
 ```
    Check the Healthchecks dashboard — the corresponding check should show "Up" with a recent ping.
 

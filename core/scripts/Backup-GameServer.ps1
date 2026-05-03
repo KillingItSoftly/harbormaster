@@ -37,12 +37,11 @@ $slug         = $Config.GameName.ToLower()
 $timestamp    = Get-Date -Format "yyyy-MM-dd_HHmm"
 $archiveName  = "${slug}_$timestamp.zip"
 $archive      = Join-Path $Config.LocalBackupRoot $archiveName
-$hcVar        = "$($Config.EnvVarPrefix)_HC_BACKUP"
 
 New-Item -ItemType Directory -Path $Config.LocalBackupRoot -Force | Out-Null
 
 # Heartbeat: starting
-Send-Heartbeat -EnvVarName $hcVar -Status Start
+Send-Heartbeat -Config $Config -Key BACKUP -Status Start
 
 # ============================================================================
 # Main backup flow
@@ -82,12 +81,11 @@ try {
             $errMsg = "CRITICAL: Failed to restart $($Config.ServiceName) after backup: $_"
             Write-Error $errMsg
             Send-HarbormasterNotification `
+                -Config $Config `
                 -Title 'Service failed to restart' `
                 -Message $errMsg `
                 -Severity Critical `
-                -Channel Alerts `
-                -EnvVarPrefix $Config.EnvVarPrefix `
-                -GameName $Config.GameName
+                -Channel Alerts
             # Don't rethrow — we still want to upload the local backup we
             # just made, since the local zip is the more important artifact.
         }
@@ -128,17 +126,16 @@ try {
     Write-Host "Done."
 
     # --- Heartbeat: success ---
-    Send-Heartbeat -EnvVarName $hcVar -Status Success
+    Send-Heartbeat -Config $Config -Key BACKUP -Status Success
 }
 catch {
     Write-Error "Backup failed: $_"
-    Send-Heartbeat -EnvVarName $hcVar -Status Fail
+    Send-Heartbeat -Config $Config -Key BACKUP -Status Fail
     Send-HarbormasterNotification `
+        -Config $Config `
         -Title 'Backup FAILED' `
         -Message "Backup script encountered an error: $_" `
         -Severity Critical `
-        -Channel Alerts `
-        -EnvVarPrefix $Config.EnvVarPrefix `
-        -GameName $Config.GameName
+        -Channel Alerts
     throw
 }

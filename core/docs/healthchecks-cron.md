@@ -45,16 +45,17 @@ When the same task runs at different times on weekdays vs weekends, create two c
 | Update Check (Weekday) | 14:05 Mon-Thu | `5 14 * * 1-4` | `<PREFIX>_HC_UPDATE_CHECK_WEEKDAY` |
 | Update Check (Weekend) | 09:05 Fri-Sun | `5 9 * * 5,6,0` | `<PREFIX>_HC_UPDATE_CHECK_WEEKEND` |
 
-In the script, pick the right env var based on today's day:
+In the script, pass the per-game `$Config` and use `-DayBucket` to pick the right env var automatically:
 
 ```powershell
 Import-Module HarbormasterHealthchecks
 
-$envVar = Get-DayBucketEnvVar -BaseName 'WINDROSE_HC_UPDATE_CHECK'
-# Returns 'WINDROSE_HC_UPDATE_CHECK_WEEKDAY' on Mon-Thu
-# Returns 'WINDROSE_HC_UPDATE_CHECK_WEEKEND' on Fri-Sun
+$Config = & "$PSScriptRoot\..\..\games\windrose\config.ps1"
 
-Send-Heartbeat -EnvVarName $envVar -Status Success
+# With -DayBucket, this resolves to either
+#   WINDROSE_HC_UPDATE_CHECK_WEEKDAY (Mon-Thu) or
+#   WINDROSE_HC_UPDATE_CHECK_WEEKEND (Fri-Sun)
+Send-Heartbeat -Config $Config -Key UPDATE_CHECK -Status Success -DayBucket
 ```
 
 ## Three signal types
@@ -72,11 +73,11 @@ For ping URL `https://hc-ping.com/abc-123`:
 `Send-Heartbeat` from `HarbormasterHealthchecks.psm1` handles all three:
 
 ```powershell
-Send-Heartbeat -EnvVarName 'WINDROSE_HC_BACKUP' -Status Start
+Send-Heartbeat -Config $Config -Key BACKUP -Status Start
 # ... do work ...
-Send-Heartbeat -EnvVarName 'WINDROSE_HC_BACKUP' -Status Success
+Send-Heartbeat -Config $Config -Key BACKUP -Status Success
 # or on failure
-Send-Heartbeat -EnvVarName 'WINDROSE_HC_BACKUP' -Status Fail
+Send-Heartbeat -Config $Config -Key BACKUP -Status Fail
 ```
 
 ## When to use Start

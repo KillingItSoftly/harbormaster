@@ -35,8 +35,7 @@ if (-not $StateFile) {
     $StateFile = "C:\Logs\${slug}-health-state.json"
 }
 
-$hcVar = Get-DayBucketEnvVar -BaseName "$($Config.EnvVarPrefix)_HC_HEALTH"
-Send-Heartbeat -EnvVarName $hcVar -Status Start
+Send-Heartbeat -Config $Config -Key HEALTH -Status Start -DayBucket
 
 # Convenience wrapper that pre-fills the per-game args.
 function Notify {
@@ -48,13 +47,12 @@ function Notify {
         [hashtable]$Fields = @{}
     )
     Send-HarbormasterNotification `
+        -Config $Config `
         -Title $Title `
         -Message $Message `
         -Severity $Severity `
         -Channel $Channel `
-        -Fields $Fields `
-        -EnvVarPrefix $Config.EnvVarPrefix `
-        -GameName $Config.GameName
+        -Fields $Fields
 }
 
 # Load previous state to avoid spamming on persistent issues
@@ -205,7 +203,7 @@ elseif ($freeGB -ge $DiskWarnGB) {
     Clear-Alert 'disk-critical'
 }
 
-Send-Heartbeat -EnvVarName $hcVar -Status Success
+Send-Heartbeat -Config $Config -Key HEALTH -Status Success -DayBucket
 
 # --- Save state ---
 $stateDir = Split-Path $StateFile -Parent

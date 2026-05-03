@@ -1,13 +1,21 @@
-
 function Send-HarbormasterNotification {
+    <#
+    .SYNOPSIS
+        Posts a Discord embed to a per-game webhook.
+    .DESCRIPTION
+        Resolves the webhook URL from the env var "${EnvVarPrefix}_WEBHOOK_${Channel}",
+        where EnvVarPrefix and the embed footer come from the per-game config.
+    .PARAMETER Config
+        Per-game config hashtable. Must contain EnvVarPrefix and GameName.
+    .EXAMPLE
+        Send-HarbormasterNotification -Config $Config `
+            -Title 'Backup OK' -Message 'Daily backup completed' -Severity Success
+    #>
     [CmdletBinding()]
     param(
+        [Parameter(Mandatory)][hashtable]$Config,
         [Parameter(Mandatory)][string]$Title,
         [Parameter(Mandatory)][string]$Message,
-
-        # Game-scoped values, normally pulled from the per-game config hashtable.
-        [Parameter(Mandatory)][string]$EnvVarPrefix,
-        [Parameter(Mandatory)][string]$GameName,
 
         [ValidateSet("Critical", "Warning", "Info", "Success")]
         [string]$Severity = "Info",
@@ -16,7 +24,16 @@ function Send-HarbormasterNotification {
         [hashtable]$Fields = @{}
     )
 
-    $envVarName = "${EnvVarPrefix}_WEBHOOK_$($Channel.ToUpper())"
+    if ([string]::IsNullOrWhiteSpace($Config.EnvVarPrefix)) {
+        Write-Warning "Config is missing EnvVarPrefix; cannot send notification."
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($Config.GameName)) {
+        Write-Warning "Config is missing GameName; cannot send notification."
+        return
+    }
+
+    $envVarName = "$($Config.EnvVarPrefix)_WEBHOOK_$($Channel.ToUpper())"
     $url = [Environment]::GetEnvironmentVariable($envVarName, 'Process')
     if ([string]::IsNullOrWhiteSpace($url)) {
         $url = [Environment]::GetEnvironmentVariable($envVarName, 'Machine')
@@ -53,7 +70,7 @@ function Send-HarbormasterNotification {
         description = $Message
         color       = $color
         timestamp   = (Get-Date).ToUniversalTime().ToString("o")
-        footer      = @{ text = "$GameName Server" }
+        footer      = @{ text = "$($Config.GameName) Server" }
     }
 
     if ($Fields.Count -gt 0) {

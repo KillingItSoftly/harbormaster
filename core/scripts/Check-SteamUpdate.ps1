@@ -62,8 +62,7 @@ if (-not $LogPath) {
 # Sibling milestone script — used for the pre-update snapshot.
 $snapshotScriptPath = Join-Path $PSScriptRoot 'Manage-Milestones.ps1'
 
-$hcVar = Get-DayBucketEnvVar -BaseName "$($Config.EnvVarPrefix)_HC_UPDATE_CHECK"
-Send-Heartbeat -EnvVarName $hcVar -Status Start
+Send-Heartbeat -Config $Config -Key UPDATE_CHECK -Status Start -DayBucket
 
 # ============================================================================
 # Notification helper
@@ -77,13 +76,12 @@ function Notify {
         [hashtable]$Fields = @{}
     )
     Send-HarbormasterNotification `
+        -Config $Config `
         -Title $Title `
         -Message $Message `
         -Severity $Severity `
         -Channel $Channel `
-        -Fields $Fields `
-        -EnvVarPrefix $Config.EnvVarPrefix `
-        -GameName $Config.GameName
+        -Fields $Fields
 }
 
 # ============================================================================
@@ -287,7 +285,7 @@ Write-Log "=== $($Config.GameName) Update Check ==="
 $installed = Get-InstalledBuildId
 if (-not $installed) {
     Write-Log "Could not determine installed build. Aborting." -Level ERROR
-    Send-Heartbeat -EnvVarName $hcVar -Status Fail
+    Send-Heartbeat -Config $Config -Key UPDATE_CHECK -Status Fail -DayBucket
     exit 2
 }
 Write-Log "Installed build: $installed"
@@ -295,7 +293,7 @@ Write-Log "Installed build: $installed"
 $publicInfo = Get-PublicBuildId
 if (-not $publicInfo) {
     Write-Log "Could not determine current public build. Aborting." -Level ERROR
-    Send-Heartbeat -EnvVarName $hcVar -Status Fail
+    Send-Heartbeat -Config $Config -Key UPDATE_CHECK -Status Fail -DayBucket
     exit 2
 }
 Write-Log "Public build:    $($publicInfo.BuildId)"
@@ -305,7 +303,7 @@ if ($publicInfo.TimeUpdated) {
 
 if ($installed -eq $publicInfo.BuildId) {
     Write-Log "Server is up to date." -Level OK
-    Send-Heartbeat -EnvVarName $hcVar -Status Success
+    Send-Heartbeat -Config $Config -Key UPDATE_CHECK -Status Success -DayBucket
     exit 0
 }
 
@@ -333,7 +331,7 @@ if ($ApplyUpdate -and -not $NotifyOnly) {
                 -Message 'Pre-update snapshot failed. Update was not applied to preserve a rollback point. Investigate manually.' `
                 -Severity Critical `
                 -Channel Alerts
-            Send-Heartbeat -EnvVarName $hcVar -Status Fail
+            Send-Heartbeat -Config $Config -Key UPDATE_CHECK -Status Fail -DayBucket
             exit 2
         }
     }
@@ -355,7 +353,7 @@ if ($ApplyUpdate -and -not $NotifyOnly) {
             -Channel Status `
             -Fields @{ From = $installed; To = $publicInfo.BuildId }
         Write-Log "Update applied successfully." -Level OK
-        Send-Heartbeat -EnvVarName $hcVar -Status Success
+        Send-Heartbeat -Config $Config -Key UPDATE_CHECK -Status Success -DayBucket
         exit 0
     }
     catch {
@@ -366,7 +364,7 @@ if ($ApplyUpdate -and -not $NotifyOnly) {
             -Severity Critical `
             -Channel Alerts `
             -Fields @{ Installed = $installed; Target = $publicInfo.BuildId }
-        Send-Heartbeat -EnvVarName $hcVar -Status Fail
+        Send-Heartbeat -Config $Config -Key UPDATE_CHECK -Status Fail -DayBucket
         exit 2
     }
 }
@@ -379,6 +377,6 @@ else {
         -Channel Alerts `
         -Fields @{ Installed = $installed; Public = $publicInfo.BuildId }
     Write-Log "Run with -ApplyUpdate to install. Exiting with code 1." -Level INFO
-    Send-Heartbeat -EnvVarName $hcVar -Status Success
+    Send-Heartbeat -Config $Config -Key UPDATE_CHECK -Status Success -DayBucket
     exit 1
 }

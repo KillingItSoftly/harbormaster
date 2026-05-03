@@ -113,10 +113,11 @@ foreach ($v in 'WINDROSE_HC_BACKUP','WINDROSE_HC_UPDATE_CHECK_WEEKDAY','WINDROSE
 
 ```powershell
 Import-Module C:\Scripts\harbormaster\core\modules\HarbormasterHealthchecks.psm1 -Force
+$Config = & 'C:\Scripts\harbormaster\games\windrose\config.ps1'
 
 # Should ping success on each check
-Send-Heartbeat -EnvVarName 'WINDROSE_HC_BACKUP' -Status Success
-Send-Heartbeat -EnvVarName 'WINDROSE_HC_HEALTH_WEEKDAY' -Status Success
+Send-Heartbeat -Config $Config -Key BACKUP -Status Success
+Send-Heartbeat -Config $Config -Key HEALTH -Status Success -DayBucket
 ```
 
 Refresh the Healthchecks dashboard. Each check you pinged should show "Up" with a recent timestamp.
@@ -126,7 +127,7 @@ Refresh the Healthchecks dashboard. Each check you pinged should show "Up" with 
 Before relying on this in production, verify alerts actually arrive:
 
 ```powershell
-Send-Heartbeat -EnvVarName 'WINDROSE_HC_BACKUP' -Status Fail
+Send-Heartbeat -Config $Config -Key BACKUP -Status Fail
 ```
 
 You should receive an email and/or Discord notification within seconds. If not, the integration setup needs fixing — the time to find out is now, not when something real breaks.
@@ -134,7 +135,7 @@ You should receive an email and/or Discord notification within seconds. If not, 
 After confirming the alert works, ping success again to clear the failed state:
 
 ```powershell
-Send-Heartbeat -EnvVarName 'WINDROSE_HC_BACKUP' -Status Success
+Send-Heartbeat -Config $Config -Key BACKUP -Status Success
 ```
 
 ## Multiple games on the same Healthchecks account
