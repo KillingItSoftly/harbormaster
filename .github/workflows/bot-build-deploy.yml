@@ -86,11 +86,18 @@ jobs:
       # `az acr build` ships the build context to ACR Tasks and builds there,
       # so we don't need Docker on the runner and we don't need to manage
       # registry credentials in the workflow.
+      #
+      # NOTE: --resource-group is required when the registry uses a
+      # domain-name-label scope (Tenant/Subscription/ResourceGroup reuse).
+      # Without it, `az acr` does a tenant-wide name lookup that fails for
+      # scoped registries. The `--registry` value is still the plain
+      # alphanumeric resource name — never the FQDN.
       - name: Build & push image with ACR Tasks
         run: |
           set -euo pipefail
           az acr build \
             --registry "$ACR_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
             --image "$IMAGE_REPOSITORY:${{ steps.tag.outputs.tag }}" \
             --image "$IMAGE_REPOSITORY:latest" \
             --file bot/Dockerfile \
@@ -103,7 +110,10 @@ jobs:
       - name: Update Container App image
         run: |
           set -euo pipefail
-          ACR_LOGIN_SERVER=$(az acr show --name "$ACR_NAME" --query loginServer -o tsv)
+          ACR_LOGIN_SERVER=$(az acr show \
+            --name "$ACR_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query loginServer -o tsv)
           az containerapp update \
             --resource-group "$RESOURCE_GROUP" \
             --name "$CONTAINER_APP_NAME" \
