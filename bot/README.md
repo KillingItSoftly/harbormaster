@@ -207,26 +207,41 @@ OIDC** — there is no service principal client secret in GitHub.
    }'
    ```
 
-3. **Grant least-privilege** roles on the resource group:
+3. **Grant least-privilege** roles, scoped to individual resources:
 
    ```bash
    SP_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
-   RG_ID=$(az group show -n <rg> --query id -o tsv)
+   ACR_ID=$(az acr show -n <acr-name> -g <rg> --query id -o tsv)
+   APP_ID_RES=$(az containerapp show -n harbormaster-bot -g <rg> --query id -o tsv)
 
-   # Build & push to ACR
+   # Contributor on the ACR resource. AcrPush alone is NOT enough — it grants
+   # only data-plane push/pull. `az acr build` schedules a run on ACR Tasks,
+   # which needs Microsoft.ContainerRegistry/registries/scheduleRun/action
+   # plus /read on the registry. Contributor scoped to the registry resource
+   # gives those without granting anything outside that one ACR.
    az role assignment create --assignee-object-id "$SP_ID" \
      --assignee-principal-type ServicePrincipal \
-     --role "AcrPush" --scope "$RG_ID"
+     --role "Contributor" --scope "$ACR_ID"
 
-   # Update the Container App revision
+   # Update the Container App revision (scoped to the app, not the RG).
    az role assignment create --assignee-object-id "$SP_ID" \
      --assignee-principal-type ServicePrincipal \
-     --role "Container Apps Contributor" --scope "$RG_ID"
+     --role "Container Apps Contributor" --scope "$APP_ID_RES"
+
+   # Only needed if you also enable the sync-vm-scripts workflow (see below).
+   # Grants the pipeline permission to check VM power state and run
+   # `git pull` on the VM via Run Command — scoped to the single VM.
+   VM_RES=$(az vm show -n <vm-name> -g <rg> --query id -o tsv)
+   az role assignment create --assignee-object-id "$SP_ID" \
+     --assignee-principal-type ServicePrincipal \
+     --role "Virtual Machine Contributor" --scope "$VM_RES"
    ```
 
-   Note that this principal **does not** get any Key Vault role. The
-   pipeline cannot read or modify secrets — only the Container App's
-   runtime identity can.
+   Note that this principal **does not** get any Key Vault role, and its
+   roles are scoped to one ACR + one Container App (+ optionally one VM)
+   — not the resource group. The pipeline cannot read or modify secrets,
+   or affect anything else in the RG. Only the Container App's runtime
+   managed identity can read secrets from Key Vault.
 
 4. **Wire up GitHub**, in the repo's *Settings → Secrets and variables → Actions*:
 
@@ -239,10 +254,41 @@ OIDC** — there is no service principal client secret in GitHub.
    | Variable | `ACR_NAME`              | your ACR name (no `.azurecr.io`) |
    | Variable | `CONTAINER_APP_NAME`    | `harbormaster-bot` (or your override) |
    | Variable | `IMAGE_REPOSITORY`      | `harbormaster-bot` (or your override) |
+   | Variable | `VM_NAME`               | game-server VM name (only for sync workflow) |
+   | Variable | `VM_REPO_PATH`          | optional, default `C:\Scripts\harbormaster` |
+   | Variable | `VM_REPO_BRANCH`        | optional, default `main` |
+   | Variable | `VM_WAIT_TIMEOUT_SEC`   | optional, default `600` |
 
 The workflow runs on every push to `main` that touches `bot/**`, and tags
 images with the 7-char commit SHA plus `latest`. You can also dispatch it
 manually with a custom tag.
+
+### Sync `core/` and `games/` to the VM
+
+A second workflow,
+[.github/workflows/sync-vm-scripts.yml](../.github/workflows/sync-vm-scripts.yml),
+runs on every push to `main` that touches `core/**` or `games/**`. It uses
+**VM Run Command** to execute `git pull --ff-only` inside the repo clone
+on the VM (default path `C:\Scripts\harbormaster`).
+
+Behavior when the VM is deallocated:
+
+- Polls `instanceView.statuses` every 30 s for up to `VM_WAIT_TIMEOUT_SEC`
+  seconds (default 10 minutes).
+- If the VM never reaches `PowerState/running`, the job logs a
+  `::warning::` and exits **successfully** so a stopped VM doesn't turn
+  the repo red. The next push (or a manual dispatch) will retry.
+- If the VM is up, it runs `git fetch` + `git pull --ff-only` and prints
+  the before/after SHAs and changed files.
+
+Prereqs on the VM (already required by the bot anyway):
+
+1. Repo cloned at `VM_REPO_PATH` (default `C:\Scripts\harbormaster`).
+2. The clone uses HTTPS to a **public** repo (no auth needed) — or, for a
+   private repo, a read-only deploy key configured in `git config`.
+3. The clone is on the branch you set as `VM_REPO_BRANCH` (default `main`).
+
+Dispatch it manually any time from the *Actions* tab to force a sync.
 
 ## Discord bot setup
 

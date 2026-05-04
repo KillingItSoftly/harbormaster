@@ -1,0 +1,173 @@
+name: Sync scripts to VM
+
+# When core/** or games/** changes on `main`, run `git pull --ff-only` on the
+# game-server VM via Run Command. If the VM is deallocated, poll for a bounded
+# window and then exit successfully — the next push (or a manual dispatch)
+# will retry. We never want script-sync to spam red X's on the repo for the
+# expected case of "the VM is asleep right now".
+#
+# Auth: same OIDC identity used by bot-build-deploy.yml. It needs:
+#   * Microsoft.Compute/virtualMachines/read   (to check power state)
+#   * Microsoft.Compute/virtualMachines/runCommand/action  (to invoke pull)
+# Both are covered by the built-in role "Virtual Machine Contributor" scoped
+# to the single VM. See bot/README.md for the role-assignment commands.
+#
+# Required GitHub Environment (production) variables:
+#   AZURE_RESOURCE_GROUP   (already set by bot-build-deploy)
+#   VM_NAME                Name of the game-server VM, e.g. "windrose-vm".
+#   VM_REPO_PATH           (optional) Repo path on the VM. Defaults to
+#                          C:\Scripts\harbormaster.
+#   VM_REPO_BRANCH         (optional) Branch to pull. Defaults to "main".
+#   VM_WAIT_TIMEOUT_SEC    (optional) Max seconds to wait for the VM to be
+#                          running. Defaults to 600 (10 min).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'core/**'
+      - 'games/**'
+      - '.github/workflows/sync-vm-scripts.yml'
+  workflow_dispatch:
+    inputs:
+      force_wait:
+        description: 'Wait the full timeout even if VM is deallocated.'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  # Serialize against itself; running two `git pull`s on the same VM at once
+  # would race. The bot-build-deploy workflow uses a different group so the
+  # two are free to overlap.
+  group: sync-vm-scripts
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+      VM: ${{ vars.VM_NAME }}
+      REPO_PATH: ${{ vars.VM_REPO_PATH || 'C:\Scripts\harbormaster' }}
+      BRANCH: ${{ vars.VM_REPO_BRANCH || 'main' }}
+      WAIT_TIMEOUT: ${{ vars.VM_WAIT_TIMEOUT_SEC || '600' }}
+
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Wait until the VM is running, with a hard cap so a long-stopped VM
+      # doesn't burn an entire runner-hour. Exits 0 (skip) on timeout so the
+      # workflow stays green; the next push to core/** or games/** will retry.
+      - name: Wait for VM to be running
+        id: wait
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + WAIT_TIMEOUT ))
+          attempt=0
+          while : ; do
+            attempt=$((attempt + 1))
+            state=$(az vm get-instance-view \
+              --resource-group "$RG" --name "$VM" \
+              --query "instanceView.statuses[?starts_with(code,'PowerState/')].code | [0]" \
+              -o tsv 2>/dev/null || echo "PowerState/unknown")
+            echo "attempt=$attempt state=$state"
+            if [ "$state" = "PowerState/running" ]; then
+              echo "ready=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::warning title=VM not running::VM '$VM' state was '$state' after ${WAIT_TIMEOUT}s. Skipping sync — the next push will retry, or run this workflow manually after starting the VM."
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 30
+          done
+
+      - name: Run git pull on the VM
+        if: steps.wait.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+
+          # The PowerShell sent over Run Command. Notes:
+          #  * $ErrorActionPreference = 'Stop' makes any failure non-zero exit.
+          #  * Push-Location/Pop-Location avoids depending on the agent CWD.
+          #  * `git fetch` first so we can capture before/after SHAs cleanly.
+          #  * --ff-only refuses to merge — fail loudly on diverged history
+          #    rather than silently creating a merge commit on the VM.
+          read -r -d '' PS_SCRIPT <<EOF || true
+          \$ErrorActionPreference = 'Stop'
+          \$repo = '${REPO_PATH}'
+          \$branch = '${BRANCH}'
+
+          if (-not (Test-Path \$repo)) {
+              Write-Error "Repo path '\$repo' does not exist on this VM."
+              exit 1
+          }
+
+          Push-Location \$repo
+          try {
+              \$before = (git rev-parse HEAD).Trim()
+              git fetch --prune origin \$branch
+              git checkout \$branch
+              git pull --ff-only origin \$branch
+              \$after  = (git rev-parse HEAD).Trim()
+
+              if (\$before -eq \$after) {
+                  Write-Output "No changes. HEAD = \$after"
+              } else {
+                  Write-Output "Updated \$branch: \$before -> \$after"
+                  Write-Output "----- Changed files -----"
+                  git diff --name-only "\$before" "\$after"
+              }
+          } finally {
+              Pop-Location
+          }
+          EOF
+
+          # Stash to a temp file so the script literal doesn't get re-quoted
+          # into oblivion when az passes it through.
+          TMP=$(mktemp)
+          printf '%s\n' "$PS_SCRIPT" > "$TMP"
+
+          set +e
+          OUTPUT=$(az vm run-command invoke \
+            --resource-group "$RG" --name "$VM" \
+            --command-id RunPowerShellScript \
+            --scripts "@$TMP" \
+            --query "value[].message" -o tsv)
+          rc=$?
+          set -e
+
+          rm -f "$TMP"
+
+          echo "----- Run Command output -----"
+          echo "$OUTPUT"
+
+          if [ $rc -ne 0 ]; then
+            echo "::error::az vm run-command invoke failed (exit $rc)."
+            exit $rc
+          fi
+
+          # Run Command returns 0 even if the inner PowerShell raised, so look
+          # for the "[stderr]" marker that Azure adds when the script wrote to
+          # the error stream.
+          if echo "$OUTPUT" | grep -qE '\[stderr\]\s*\S'; then
+            echo "::error::PowerShell on the VM reported an error (see output above)."
+            exit 1
+          fi
+
+      - name: Skipped (VM not running)
+        if: steps.wait.outputs.ready != 'true'
+        run: |
+          echo "VM was not running within the timeout. Nothing to do."
