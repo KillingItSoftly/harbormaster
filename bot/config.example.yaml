@@ -9,6 +9,12 @@ discord:
   # Optional channel ID for posting action confirmations. Omit to disable.
   status_channel_id: null
 
+  # Optional dedicated channel for an audit log of every privileged action
+  # (who, what, when, success/failure). Highly recommended. Omit to disable.
+  # The channel should be readable by your trust circle and writable only
+  # by the bot.
+  audit_channel_id: null
+
 azure:
   subscription_id: "00000000-0000-0000-0000-000000000000"
   resource_group: "rg-harbormaster"
@@ -24,4 +30,14 @@ game:
   log_path: 'C:\GameServers\Windrose\logs\server-stdout.log'
 
 # Per-user, per-command rate limit in seconds.
-rate_limit_seconds: 30
+rate_limit_seconds: 240
+
+# Optional per-command cooldown overrides (qualified name -> seconds).
+# Use longer cooldowns for destructive commands.
+rate_limit_overrides:
+  server stop: 7200
+  update apply: 86400
+  snapshot create: 3600
+  backup now: 480
+  maintenance on: 30
+  maintenance off: 30

@@ -1,12 +1,18 @@
 <#
 .SYNOPSIS
-    Daily backup of a Harbormaster-managed game server: stops the service,
-    zips the saved data, uploads to Azure blob storage, prunes old backups.
+    Daily backup of a Harbormaster-managed game server: optionally warns
+    players, stops the service, zips the saved data, uploads to Azure blob
+    storage, prunes old backups, restarts the service.
 
 .DESCRIPTION
     Game-agnostic. All paths, names, retention values and env-var prefixes
     come from the -Config hashtable, normally produced by a per-game
     config.ps1 (see games/<slug>/config.ps1).
+
+    By default the script posts a warning embed to the Status channel
+    before stopping the service, sleeps -AnnounceLeadSeconds, then
+    proceeds. When invoked from the shutdown chain pass -SkipAnnounce so
+    a single combined warning is shown by Announce-ServerShutdown.ps1.
 
 .PARAMETER Config
     Hashtable with at least:
@@ -14,11 +20,29 @@
       ServiceName, SavedDataPath
       LocalBackupRoot, StorageAccount, BlobContainer
       LocalRetention, BlobRetention
+
+.PARAMETER SkipAnnounce
+    Skip the "going offline for backup" Discord warning. Used by
+    Announce-ServerShutdown.ps1, which posts its own combined warning.
+
+.PARAMETER AnnounceLeadSeconds
+    How long to wait between sending the warning and stopping the
+    service. Default 60. Ignored if -SkipAnnounce is set.
+
+.PARAMETER NoRestart
+    Leave the service stopped after the backup completes. Used by the
+    shutdown chain so we don't bounce the service just to stop it again.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [hashtable]$Config
+    [hashtable]$Config,
+
+    [switch]$SkipAnnounce,
+
+    [int]$AnnounceLeadSeconds = 60,
+
+    [switch]$NoRestart
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,6 +53,11 @@ $ErrorActionPreference = "Stop"
 $moduleRoot = Join-Path $PSScriptRoot '..\modules'
 Import-Module (Join-Path $moduleRoot 'HarbormasterHealthchecks.psm1') -Force
 Import-Module (Join-Path $moduleRoot 'HarbormasterNotify.psm1') -Force
+Import-Module (Join-Path $moduleRoot 'HarbormasterLock.psm1') -Force
+
+# Acquire the per-game VM-wide lock. We wait briefly so a manual /backup
+# now invoked seconds before the nightly cron doesn't both bail.
+$hmLock = Acquire-HarbormasterLock -Config $Config -Operation 'backup' -TimeoutSeconds 30
 
 # ============================================================================
 # Setup
@@ -42,6 +71,25 @@ New-Item -ItemType Directory -Path $Config.LocalBackupRoot -Force | Out-Null
 
 # Heartbeat: starting
 Send-Heartbeat -Config $Config -Key BACKUP -Status Start
+
+# ============================================================================
+# Pre-backup announce (skipped when called from the shutdown chain)
+# ============================================================================
+if (-not $SkipAnnounce) {
+    $leadMin = [math]::Max(1, [math]::Round($AnnounceLeadSeconds / 60.0))
+    Send-HarbormasterNotification `
+        -Config $Config `
+        -Title "$($Config.GameName) backup starting" `
+        -Message ("Server will be offline for a few minutes for backup. " +
+                  "Service stops in ~$leadMin minute(s).") `
+        -Severity Warning `
+        -Channel Status `
+        -Fields @{
+            Service        = $Config.ServiceName
+            'Stops in'     = "$AnnounceLeadSeconds s"
+        }
+    Start-Sleep -Seconds $AnnounceLeadSeconds
+}
 
 # ============================================================================
 # Main backup flow
@@ -64,30 +112,42 @@ try {
         Write-Host "Local backup complete: $sizeMB MB"
     }
     finally {
-        # --- Restart the service ---
-        # Runs whether the zip succeeded or failed, so the server comes back
-        # up either way.
-        Write-Host "Restarting $($Config.ServiceName) service..."
-        try {
-            Start-Service $Config.ServiceName -ErrorAction Stop
-            Start-Sleep -Seconds 10
-            $svc = Get-Service $Config.ServiceName
-            if ($svc.Status -ne "Running") {
-                throw "Service status is $($svc.Status) after start attempt"
-            }
-            Write-Host "Service restarted successfully"
+        # --- Restart the service (unless caller asked us to leave it stopped) ---
+        if ($NoRestart) {
+            Write-Host "NoRestart set; leaving service stopped."
         }
-        catch {
-            $errMsg = "CRITICAL: Failed to restart $($Config.ServiceName) after backup: $_"
-            Write-Error $errMsg
-            Send-HarbormasterNotification `
-                -Config $Config `
-                -Title 'Service failed to restart' `
-                -Message $errMsg `
-                -Severity Critical `
-                -Channel Alerts
-            # Don't rethrow — we still want to upload the local backup we
-            # just made, since the local zip is the more important artifact.
+        else {
+            Write-Host "Restarting $($Config.ServiceName) service..."
+            try {
+                Start-Service $Config.ServiceName -ErrorAction Stop
+                Start-Sleep -Seconds 10
+                $svc = Get-Service $Config.ServiceName
+                if ($svc.Status -ne "Running") {
+                    throw "Service status is $($svc.Status) after start attempt"
+                }
+                Write-Host "Service restarted successfully"
+
+                if (-not $SkipAnnounce) {
+                    Send-HarbormasterNotification `
+                        -Config $Config `
+                        -Title "$($Config.GameName) is back online" `
+                        -Message 'Backup complete. Service is running again.' `
+                        -Severity Success `
+                        -Channel Status
+                }
+            }
+            catch {
+                $errMsg = "CRITICAL: Failed to restart $($Config.ServiceName) after backup: $_"
+                Write-Error $errMsg
+                Send-HarbormasterNotification `
+                    -Config $Config `
+                    -Title 'Service failed to restart' `
+                    -Message $errMsg `
+                    -Severity Critical `
+                    -Channel Alerts
+                # Don't rethrow — we still want to upload the local backup we
+                # just made, since the local zip is the more important artifact.
+            }
         }
     }
 
@@ -138,4 +198,7 @@ catch {
         -Severity Critical `
         -Channel Alerts
     throw
+}
+finally {
+    Release-HarbormasterLock $hmLock
 }

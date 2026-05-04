@@ -1,0 +1,118 @@
+name: Bot — build, push, deploy
+
+# Builds the Discord bot container image in Azure Container Registry and rolls
+# out a new Container App revision. Authentication uses GitHub OIDC against an
+# Entra app registration with federated credentials — no long-lived service
+# principal secrets are stored in GitHub.
+#
+# Runtime secrets (Discord token, bot config YAML) live in Key Vault and are
+# pulled by the Container App's managed identity at revision start. They never
+# touch this workflow.
+#
+# Required GitHub repository secrets (none of these are sensitive — they are
+# identifiers, not credentials):
+#   AZURE_CLIENT_ID         App registration (client) ID with the federated
+#                           credential bound to this repo.
+#   AZURE_TENANT_ID         Entra tenant ID.
+#   AZURE_SUBSCRIPTION_ID   Subscription that owns the resource group.
+#
+# Required GitHub repository variables:
+#   AZURE_RESOURCE_GROUP    Resource group containing the ACR and Container App.
+#   ACR_NAME                Name of the Azure Container Registry (no .azurecr.io).
+#   CONTAINER_APP_NAME      Container App name (defaults to harbormaster-bot).
+#   IMAGE_REPOSITORY        Image name in ACR (defaults to harbormaster-bot).
+#
+# The federated credential subject for `main` pushes is:
+#   repo:<owner>/<repo>:ref:refs/heads/main
+# and for manual runs:
+#   repo:<owner>/<repo>:environment:bot-deploy   (only if you wire it up)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'bot/**'
+      - '.github/workflows/bot-build-deploy.yml'
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to build and deploy (defaults to commit SHA).'
+        required: false
+        type: string
+
+permissions:
+  id-token: write   # required for OIDC
+  contents: read
+
+concurrency:
+  group: bot-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    # Bind to a GitHub Environment so its protection rules (required
+    # reviewers, deployment branches) gate this job, and the OIDC token's
+    # `sub` claim becomes `repo:<owner>/<repo>:environment:production`.
+    environment: production
+    env:
+      ACR_NAME: ${{ vars.ACR_NAME }}
+      RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      CONTAINER_APP_NAME: ${{ vars.CONTAINER_APP_NAME || 'harbormaster-bot' }}
+      IMAGE_REPOSITORY: ${{ vars.IMAGE_REPOSITORY || 'harbormaster-bot' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.image_tag }}" ]; then
+            echo "tag=${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # OIDC login — no client secret. The federated credential on the Entra
+      # app registration constrains which repo+ref can mint a token.
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # `az acr build` ships the build context to ACR Tasks and builds there,
+      # so we don't need Docker on the runner and we don't need to manage
+      # registry credentials in the workflow.
+      - name: Build & push image with ACR Tasks
+        run: |
+          set -euo pipefail
+          az acr build \
+            --registry "$ACR_NAME" \
+            --image "$IMAGE_REPOSITORY:${{ steps.tag.outputs.tag }}" \
+            --image "$IMAGE_REPOSITORY:latest" \
+            --file bot/Dockerfile \
+            bot
+
+      # Roll the Container App to the freshly-built tag. The Container App's
+      # user-assigned managed identity already has AcrPull and Key Vault
+      # Secrets User; we just point it at the new image and Container Apps
+      # creates a new revision (and re-fetches Key Vault secrets).
+      - name: Update Container App image
+        run: |
+          set -euo pipefail
+          ACR_LOGIN_SERVER=$(az acr show --name "$ACR_NAME" --query loginServer -o tsv)
+          az containerapp update \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$CONTAINER_APP_NAME" \
+            --image "$ACR_LOGIN_SERVER/$IMAGE_REPOSITORY:${{ steps.tag.outputs.tag }}"
+
+      - name: Show active revision
+        run: |
+          az containerapp revision list \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$CONTAINER_APP_NAME" \
+            --query "[?properties.active].{name:name, image:properties.template.containers[0].image, createdTime:properties.createdTime}" \
+            -o table

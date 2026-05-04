@@ -54,6 +54,7 @@ $ErrorActionPreference = 'Stop'
 $moduleRoot = Join-Path $PSScriptRoot '..\modules'
 Import-Module (Join-Path $moduleRoot 'HarbormasterNotify.psm1') -Force
 Import-Module (Join-Path $moduleRoot 'HarbormasterHealthchecks.psm1') -Force
+Import-Module (Join-Path $moduleRoot 'HarbormasterLock.psm1') -Force
 
 if (-not $LogPath) {
     $LogPath = "C:\Logs\$($Config.GameName)-UpdateCheck.log"
@@ -311,61 +312,69 @@ if ($installed -eq $publicInfo.BuildId) {
 Write-Log "UPDATE AVAILABLE: installed=$installed, public=$($publicInfo.BuildId)" -Level WARN
 
 if ($ApplyUpdate -and -not $NotifyOnly) {
-    Notify `
-        -Title 'Update available - applying' `
-        -Message "$($Config.GameName) update detected. Will snapshot then apply." `
-        -Severity Warning `
-        -Channel Alerts `
-        -Fields @{ Installed = $installed; Public = $publicInfo.BuildId }
+    # Acquire the VM-wide lock for the snapshot+update window. /backup now
+    # and /update apply collide otherwise.
+    $hmLock = Acquire-HarbormasterLock -Config $Config -Operation 'update' -TimeoutSeconds 60
+    try {
+        Notify `
+            -Title 'Update available - applying' `
+            -Message "$($Config.GameName) update detected. Will snapshot then apply." `
+            -Severity Warning `
+            -Channel Alerts `
+            -Fields @{ Installed = $installed; Public = $publicInfo.BuildId }
 
-    if (-not $SkipSnapshot) {
-        Write-Log "Taking pre-update snapshot..." -Level INFO
-        $snapshotOk = Invoke-PreUpdateSnapshot `
-            -InstalledBuild $installed `
-            -PublicBuild $publicInfo.BuildId
+        if (-not $SkipSnapshot) {
+            Write-Log "Taking pre-update snapshot..." -Level INFO
+            $snapshotOk = Invoke-PreUpdateSnapshot `
+                -InstalledBuild $installed `
+                -PublicBuild $publicInfo.BuildId
 
-        if (-not $snapshotOk) {
-            Write-Log "Pre-update snapshot FAILED. Aborting update." -Level ERROR
+            if (-not $snapshotOk) {
+                Write-Log "Pre-update snapshot FAILED. Aborting update." -Level ERROR
+                Notify `
+                    -Title 'Update aborted - snapshot failed' `
+                    -Message 'Pre-update snapshot failed. Update was not applied to preserve a rollback point. Investigate manually.' `
+                    -Severity Critical `
+                    -Channel Alerts
+                Send-Heartbeat -Config $Config -Key UPDATE_CHECK -Status Fail -DayBucket
+                exit 2
+            }
+        }
+        else {
+            Write-Log "SkipSnapshot flag set; bypassing snapshot. No rollback point." -Level WARN
             Notify `
-                -Title 'Update aborted - snapshot failed' `
-                -Message 'Pre-update snapshot failed. Update was not applied to preserve a rollback point. Investigate manually.' `
-                -Severity Critical `
+                -Title 'Update without snapshot' `
+                -Message 'SkipSnapshot flag was set. Update is being applied without a rollback point.' `
+                -Severity Warning `
                 -Channel Alerts
+        }
+
+        try {
+            Invoke-Update
+            Notify `
+                -Title 'Update applied' `
+                -Message "$($Config.GameName) updated successfully and service is running." `
+                -Severity Success `
+                -Channel Status `
+                -Fields @{ From = $installed; To = $publicInfo.BuildId }
+            Write-Log "Update applied successfully." -Level OK
+            Send-Heartbeat -Config $Config -Key UPDATE_CHECK -Status Success -DayBucket
+            exit 0
+        }
+        catch {
+            Write-Log "Update failed: $_" -Level ERROR
+            Notify `
+                -Title 'Update FAILED' `
+                -Message "SteamCMD update failed: $_`n`nA pre-update snapshot was taken; you can roll back if needed." `
+                -Severity Critical `
+                -Channel Alerts `
+                -Fields @{ Installed = $installed; Target = $publicInfo.BuildId }
             Send-Heartbeat -Config $Config -Key UPDATE_CHECK -Status Fail -DayBucket
             exit 2
         }
     }
-    else {
-        Write-Log "SkipSnapshot flag set; bypassing snapshot. No rollback point." -Level WARN
-        Notify `
-            -Title 'Update without snapshot' `
-            -Message 'SkipSnapshot flag was set. Update is being applied without a rollback point.' `
-            -Severity Warning `
-            -Channel Alerts
-    }
-
-    try {
-        Invoke-Update
-        Notify `
-            -Title 'Update applied' `
-            -Message "$($Config.GameName) updated successfully and service is running." `
-            -Severity Success `
-            -Channel Status `
-            -Fields @{ From = $installed; To = $publicInfo.BuildId }
-        Write-Log "Update applied successfully." -Level OK
-        Send-Heartbeat -Config $Config -Key UPDATE_CHECK -Status Success -DayBucket
-        exit 0
-    }
-    catch {
-        Write-Log "Update failed: $_" -Level ERROR
-        Notify `
-            -Title 'Update FAILED' `
-            -Message "SteamCMD update failed: $_`n`nA pre-update snapshot was taken; you can roll back if needed." `
-            -Severity Critical `
-            -Channel Alerts `
-            -Fields @{ Installed = $installed; Target = $publicInfo.BuildId }
-        Send-Heartbeat -Config $Config -Key UPDATE_CHECK -Status Fail -DayBucket
-        exit 2
+    finally {
+        Release-HarbormasterLock $hmLock
     }
 }
 else {

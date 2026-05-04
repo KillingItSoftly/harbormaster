@@ -75,6 +75,11 @@ azureauth.json
 # Service principal credentials
 *-credentials.json
 
+# Bicep parameter files with environment-specific values (RG names, KV names,
+# etc.). The *.example.json templates are kept; real ones stay local.
+bot/infra/main.parameters.json
+!bot/infra/main.parameters.example.json
+
 # ----- Editor & OS ------------------------------------------------------------
 # VS Code workspace files (keep settings, ignore per-user state)
 .vscode/*

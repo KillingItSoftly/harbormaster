@@ -43,6 +43,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Module imports for shared helpers (esp. the VM-wide lock).
+$moduleRoot = Join-Path $PSScriptRoot '..\modules'
+Import-Module (Join-Path $moduleRoot 'HarbormasterLock.psm1') -Force
+
 # Retention by category in days. Use $null for "keep forever".
 $retention = @{
     'pristine'   = $null
@@ -263,7 +267,14 @@ function Invoke-List {
 }
 
 switch ($Action) {
-    'Snapshot' { Invoke-Snapshot }
+    'Snapshot' {
+        # Snapshots stop/restart the service and write a zip — they need the
+        # exclusive lock. Wait briefly so a chained call from
+        # Check-SteamUpdate.ps1 doesn't lose to a sibling script that just
+        # finished.
+        $hmLock = Acquire-HarbormasterLock -Config $Config -Operation 'snapshot' -TimeoutSeconds 30
+        try { Invoke-Snapshot } finally { Release-HarbormasterLock $hmLock }
+    }
     'Prune'    { Invoke-Prune }
     'List'     { Invoke-List }
 }

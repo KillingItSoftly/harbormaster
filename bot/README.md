@@ -83,7 +83,9 @@ python -m harbormaster_bot
 Slash commands sync to the configured guild on startup; they appear in the
 Discord client within a few seconds.
 
-## Build and push the image
+## Build and push the image (manual)
+
+The CI pipeline (below) is the recommended path. For one-off local pushes:
 
 ```bash
 ACR=<your-acr-name>
@@ -98,20 +100,65 @@ If you don't have an ACR yet:
 az acr create -g <rg> -n <acr-name> --sku Basic --admin-enabled false
 ```
 
-## Deploy to Azure Container Apps
+## Secrets live in Key Vault
+
+The Container App **does not** receive the Discord token or config YAML as
+deployment parameters. Instead they are stored in an Azure Key Vault, and
+the Container App's user-assigned managed identity reads them at startup
+(via the native Container Apps Key Vault secret reference).
+
+This means:
+
+- Pipeline runners never see the token.
+- ARM deployment history doesn't contain the token.
+- Rotating a secret is `az keyvault secret set` — no Bicep redeploy needed.
+- Picking up the rotated value is a one-shot `az containerapp revision restart`.
+
+### One-time: provision the Key Vault and seed secrets
+
+```bash
+RG=<your-rg>
+KV=<your-keyvault-name>   # globally unique, 3-24 chars
+
+az deployment group create \
+  -g "$RG" \
+  -f infra/keyvault.bicep \
+  -p keyVaultName="$KV"
+
+# Grant *yourself* permission to write secrets (one-time, your user account).
+ME=$(az ad signed-in-user show --query id -o tsv)
+az role assignment create \
+  --assignee-object-id "$ME" --assignee-principal-type User \
+  --role "Key Vault Secrets Officer" \
+  --scope "$(az keyvault show -n "$KV" --query id -o tsv)"
+
+# Seed the two secrets the bot expects.
+az keyvault secret set --vault-name "$KV" \
+  --name discord-bot-token --value '<paste-discord-bot-token>'
+
+az keyvault secret set --vault-name "$KV" \
+  --name harbormaster-config --file ./config.yaml
+```
+
+The `harbormaster-config` secret is the **entire `config.yaml` file**. The
+bot reads it from the `HARBORMASTER_CONFIG_YAML` env var, so no volume
+mount is needed.
+
+### Deploy the bot
 
 The Bicep at [infra/bot.bicep](infra/bot.bicep) creates:
 
 - User-assigned managed identity
 - Log Analytics workspace
 - Container Apps managed environment
-- Container App (1 replica, pinned)
-- `AcrPull` on the ACR for the identity
-- `Virtual Machine Contributor` on the target VM for the identity
+- Container App (1 replica, pinned), with secrets referenced from Key Vault
+- `AcrPull` on the ACR
+- `Virtual Machine Contributor` on the target VM
+- `Key Vault Secrets User` on the Key Vault
 
 ```bash
 cp infra/main.parameters.example.json infra/main.parameters.json
-# Edit main.parameters.json: ACR name, VM name, Discord token, full config YAML
+# Edit: namePrefix, acrName, image, vmName, keyVaultName
 
 az deployment group create \
   -g <your-rg> \
@@ -119,21 +166,83 @@ az deployment group create \
   -p @infra/main.parameters.json
 ```
 
-The `configYaml` parameter takes the **entire `config.yaml` file as a string**.
-It's stored as a Container App secret and exposed inside the container as
-`HARBORMASTER_CONFIG_YAML`. The bot prefers this over a file on disk if it's
-set, so no volume mount is needed.
-
-After the first deploy, rotate the token or config with:
+### Rotate a secret
 
 ```bash
-az containerapp secret set \
-  -g <rg> -n harbormaster-bot \
-  --secrets discord-bot-token=<new-token> \
-            harbormaster-config="$(cat config.yaml)"
+az keyvault secret set --vault-name "$KV" \
+  --name discord-bot-token --value '<new-token>'
 
-az containerapp revision restart -g <rg> -n harbormaster-bot
+# Force a new revision so Container Apps re-fetches the latest version.
+az containerapp revision restart -g <rg> -n harbormaster-bot \
+  --revision $(az containerapp revision list -g <rg> -n harbormaster-bot \
+                  --query "[?properties.active].name | [0]" -o tsv)
 ```
+
+## CI/CD: GitHub Actions
+
+The workflow at
+[.github/workflows/bot-build-deploy.yml](../.github/workflows/bot-build-deploy.yml)
+builds the image with **ACR Tasks** (no Docker daemon on the runner) and
+rolls the Container App to the new tag. It authenticates with **GitHub
+OIDC** — there is no service principal client secret in GitHub.
+
+### One-time setup
+
+1. **Create an Entra app registration** the workflow will impersonate:
+
+   ```bash
+   APP_ID=$(az ad app create --display-name harbormaster-bot-deploy \
+              --query appId -o tsv)
+   az ad sp create --id "$APP_ID"
+   ```
+
+2. **Add a federated credential** that trusts pushes to `main` of this repo:
+
+   ```bash
+   az ad app federated-credential create --id "$APP_ID" --parameters '{
+     "name": "github-main",
+     "issuer": "https://token.actions.githubusercontent.com",
+     "subject": "repo:<owner>/<repo>:ref:refs/heads/main",
+     "audiences": ["api://AzureADTokenExchange"]
+   }'
+   ```
+
+3. **Grant least-privilege** roles on the resource group:
+
+   ```bash
+   SP_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
+   RG_ID=$(az group show -n <rg> --query id -o tsv)
+
+   # Build & push to ACR
+   az role assignment create --assignee-object-id "$SP_ID" \
+     --assignee-principal-type ServicePrincipal \
+     --role "AcrPush" --scope "$RG_ID"
+
+   # Update the Container App revision
+   az role assignment create --assignee-object-id "$SP_ID" \
+     --assignee-principal-type ServicePrincipal \
+     --role "Container Apps Contributor" --scope "$RG_ID"
+   ```
+
+   Note that this principal **does not** get any Key Vault role. The
+   pipeline cannot read or modify secrets — only the Container App's
+   runtime identity can.
+
+4. **Wire up GitHub**, in the repo's *Settings → Secrets and variables → Actions*:
+
+   | Type | Name | Value |
+   |---|---|---|
+   | Secret   | `AZURE_CLIENT_ID`       | `$APP_ID` |
+   | Secret   | `AZURE_TENANT_ID`       | `az account show --query tenantId -o tsv` |
+   | Secret   | `AZURE_SUBSCRIPTION_ID` | `az account show --query id -o tsv` |
+   | Variable | `AZURE_RESOURCE_GROUP`  | your RG name |
+   | Variable | `ACR_NAME`              | your ACR name (no `.azurecr.io`) |
+   | Variable | `CONTAINER_APP_NAME`    | `harbormaster-bot` (or your override) |
+   | Variable | `IMAGE_REPOSITORY`      | `harbormaster-bot` (or your override) |
+
+The workflow runs on every push to `main` that touches `bot/**`, and tags
+images with the 7-char commit SHA plus `latest`. You can also dispatch it
+manually with a custom tag.
 
 ## Discord bot setup
 
@@ -167,7 +276,9 @@ So roughly **$10–12/mo** added on top of the existing VM and storage.
   on every command.
 - Run Command output is captured and posted to Discord (truncated to 1.8 KB).
   Don't put secrets in scripts that the bot can call.
-- The `configYaml` Bicep parameter is `@secure()` — Azure Resource Manager
-  redacts it from logs and the portal, but anyone with `Reader` on the
-  Container App can still read its env-var secret values. Don't share the
-  RG with people you don't trust.
+- Runtime secrets (Discord token, config YAML) live in Key Vault. The
+  Container App's managed identity has `Key Vault Secrets User` (read
+  only), and the CI pipeline's identity has **no** Key Vault role at all.
+  Anyone with `Reader` on the Container App can still read the resolved
+  env-var values from a running revision — don't share the RG with people
+  you don't trust.

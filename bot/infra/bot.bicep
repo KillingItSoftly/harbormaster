@@ -2,13 +2,23 @@
 // Harbormaster Discord bot — Azure Container App deployment
 // ============================================================================
 // Deploys the bot as a single-replica Container App, with a user-assigned
-// managed identity granted Virtual Machine Contributor on the existing game-
-// server VM (so it can start, stop, and run PowerShell on it via Run Command).
+// managed identity granted:
+//   * AcrPull on the existing Azure Container Registry
+//   * Virtual Machine Contributor on the existing game-server VM
+//   * Key Vault Secrets User on the existing Key Vault that holds the bot's
+//     runtime secrets (discord-bot-token, harbormaster-config)
 //
-// Prereqs:
-//   * Existing resource group (this template is RG-scoped)
-//   * Existing Azure Container Registry with the bot image pushed
-//   * Existing Windows VM (the game server) in the same RG
+// Runtime secrets are *referenced* from Key Vault, not passed in as
+// parameters. That means CI/CD pipelines (and ARM deployment history) never
+// see the actual values — the Container App fetches them at startup via
+// managed identity.
+//
+// Prereqs (deploy these once, separately):
+//   * Resource group (this template is RG-scoped)
+//   * Azure Container Registry with the bot image pushed
+//   * Windows VM (the game server) in the same RG
+//   * Key Vault with secrets `discord-bot-token` and `harbormaster-config`
+//     seeded (see infra/keyvault.bicep)
 // ============================================================================
 
 @description('Location for all bot resources. Defaults to the resource group location.')
@@ -26,13 +36,17 @@ param image string = 'harbormaster-bot:latest'
 @description('Name of the existing game-server VM to control.')
 param vmName string
 
-@description('Discord bot token. Stored as a Container App secret.')
-@secure()
-param discordBotToken string
+@description('Existing Key Vault that holds the bot runtime secrets.')
+param keyVaultName string
 
-@description('Full bot config as YAML (see bot/config.example.yaml). Stored as a Container App secret and exposed as HARBORMASTER_CONFIG_YAML.')
-@secure()
-param configYaml string
+@description('Resource group of the Key Vault. Defaults to the current resource group.')
+param keyVaultResourceGroup string = resourceGroup().name
+
+@description('Name of the Key Vault secret holding the Discord bot token.')
+param discordTokenSecretName string = 'discord-bot-token'
+
+@description('Name of the Key Vault secret holding the full bot config YAML.')
+param configYamlSecretName string = 'harbormaster-config'
 
 // --- Existing references --------------------------------------------------
 
@@ -42,6 +56,11 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' existin
 
 resource vm 'Microsoft.Compute/virtualMachines@2024-03-01' existing = {
   name: vmName
+}
+
+resource kv 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
+  name: keyVaultName
+  scope: resourceGroup(keyVaultResourceGroup)
 }
 
 // --- Identity -------------------------------------------------------------
@@ -76,6 +95,17 @@ resource vmContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
       'Microsoft.Authorization/roleDefinitions',
       '9980e02c-c2be-4d73-94e8-173b1dc7cf3c' // Virtual Machine Contributor
     )
+  }
+}
+
+// Key Vault Secrets User on the Key Vault (read secrets only).
+// Scoped via a nested module so the KV may live in a different RG.
+module kvRole 'kv-role.bicep' = {
+  name: 'kv-secrets-user'
+  scope: resourceGroup(keyVaultResourceGroup)
+  params: {
+    keyVaultName: keyVaultName
+    principalId: identity.properties.principalId
   }
 }
 
@@ -119,14 +149,21 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
     managedEnvironmentId: env.id
     configuration: {
       activeRevisionsMode: 'Single'
+      // Container Apps natively supports Key Vault secret references: the
+      // platform fetches the latest secret value using the linked managed
+      // identity at revision start, and re-fetches on revision restart.
+      // The actual secret value never appears in this template, in
+      // deployment history, or in the CI pipeline.
       secrets: [
         {
           name: 'discord-bot-token'
-          value: discordBotToken
+          keyVaultUrl: '${kv.properties.vaultUri}secrets/${discordTokenSecretName}'
+          identity: identity.id
         }
         {
           name: 'harbormaster-config'
-          value: configYaml
+          keyVaultUrl: '${kv.properties.vaultUri}secrets/${configYamlSecretName}'
+          identity: identity.id
         }
       ]
       registries: [
@@ -171,6 +208,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
   }
   dependsOn: [
     acrPullRole
+    kvRole
   ]
 }
 

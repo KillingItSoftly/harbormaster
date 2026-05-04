@@ -55,11 +55,22 @@ function Notify {
         -Fields $Fields
 }
 
-# Load previous state to avoid spamming on persistent issues
-$state = if (Test-Path $StateFile) {
-    Get-Content $StateFile -Raw | ConvertFrom-Json -AsHashtable
-} else {
-    @{}
+# Load previous state to avoid spamming on persistent issues.
+# PS 5.1's ConvertFrom-Json has no -AsHashtable, so walk the PSCustomObject manually.
+$state = @{}
+if (Test-Path $StateFile) {
+    try {
+        $raw = Get-Content $StateFile -Raw | ConvertFrom-Json
+        if ($raw) {
+            foreach ($prop in $raw.PSObject.Properties) {
+                $state[$prop.Name] = $prop.Value
+            }
+        }
+    }
+    catch {
+        Write-Warning "Could not parse state file '$StateFile': $_. Starting fresh."
+        $state = @{}
+    }
 }
 
 $now = Get-Date
@@ -210,4 +221,15 @@ $stateDir = Split-Path $StateFile -Parent
 if (-not (Test-Path $stateDir)) {
     New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
 }
-$state | ConvertTo-Json | Set-Content $StateFile -Encoding UTF8
+# Atomic write: serialize to a tmp file, then Move-Item over the
+# original. Prevents a corrupted/half-written state file if the script
+# is killed mid-write (or the VM is deallocated mid-write).
+$tmp = "$StateFile.tmp"
+try {
+    $state | ConvertTo-Json | Set-Content $tmp -Encoding UTF8
+    Move-Item -Path $tmp -Destination $StateFile -Force
+}
+catch {
+    Write-Warning "Could not persist state file '$StateFile': $_"
+    if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+}
