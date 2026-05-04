@@ -105,6 +105,12 @@ jobs:
           #  * `git fetch` first so we can capture before/after SHAs cleanly.
           #  * --ff-only refuses to merge — fail loudly on diverged history
           #    rather than silently creating a merge commit on the VM.
+          #  * Variables that are followed by ':' in interpolated strings MUST
+          #    use ${name} braces. Bare `$branch:` is parsed as a PowerShell
+          #    drive-qualified variable (like $env:PATH) and fails to parse.
+          #  * We append a SYNC_RESULT line on success so the runner can
+          #    distinguish a successful run from a parser/runtime error,
+          #    which Run Command otherwise reports in plain stdout.
           read -r -d '' PS_SCRIPT <<EOF || true
           \$ErrorActionPreference = 'Stop'
           \$repo = '${REPO_PATH}'
@@ -126,10 +132,11 @@ jobs:
               if (\$before -eq \$after) {
                   Write-Output "No changes. HEAD = \$after"
               } else {
-                  Write-Output "Updated \$branch: \$before -> \$after"
+                  Write-Output "Updated \${branch}: \$before -> \$after"
                   Write-Output "----- Changed files -----"
                   git diff --name-only "\$before" "\$after"
               }
+              Write-Output "SYNC_RESULT=ok"
           } finally {
               Pop-Location
           }
@@ -159,11 +166,18 @@ jobs:
             exit $rc
           fi
 
-          # Run Command returns 0 even if the inner PowerShell raised, so look
-          # for the "[stderr]" marker that Azure adds when the script wrote to
-          # the error stream.
+          # Run Command exits 0 even if the inner PowerShell raised — both
+          # parser errors and runtime exceptions land in plain stdout. Two
+          # belt-and-braces checks:
+          #   1. The success sentinel must be present.
+          #   2. No "[stderr]" block (Azure adds this when $ErrorActionPreference
+          #      = Stop is hit cleanly).
           if echo "$OUTPUT" | grep -qE '\[stderr\]\s*\S'; then
-            echo "::error::PowerShell on the VM reported an error (see output above)."
+            echo "::error::PowerShell on the VM wrote to stderr (see output above)."
+            exit 1
+          fi
+          if ! echo "$OUTPUT" | grep -q '^SYNC_RESULT=ok$'; then
+            echo "::error::SYNC_RESULT sentinel missing — script aborted before completion (parser error or unexpected exit)."
             exit 1
           fi
 
